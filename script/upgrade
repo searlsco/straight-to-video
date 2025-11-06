@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+
+# Upgrade dependencies and run install+tests
+
+set -euo pipefail
+cd "$(dirname "$0")/.."
+
+npx npm-check-updates -u && npm it
+

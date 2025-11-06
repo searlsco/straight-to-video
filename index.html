@@ -1,0 +1,246 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Straight‑to‑Video — Client‑side Video Optimization</title>
+    <meta name="description" content="ESM‑only, browser‑first video optimization helpers + Stimulus controller. Optimize before upload, right in the client." />
+    <link rel="preconnect" href="https://cdn.jsdelivr.net" />
+    <script type="importmap">
+    {
+      "imports": {
+        "straight-to-video": "./index.js",
+        "@hotwired/stimulus": "https://cdn.jsdelivr.net/npm/@hotwired/stimulus/+esm",
+        "mediabunny": "https://cdn.jsdelivr.net/npm/mediabunny/+esm"
+      }
+    }
+    </script>
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/prismjs@1.29.0/themes/prism-tomorrow.min.css">
+    <style>
+      :root {
+        --bg: #0a0b14;
+        --bg2: #090a12;
+        --fg: #eaf4ff;
+        --muted: #b5c0d0cc;
+        --accent: #7afcff; /* neon cyan */
+        --accent2: #ff5ef1; /* neon magenta */
+        --accent3: #ffd36e; /* warm neon */
+        --grid: #ffffff0d;
+        --section-mt: 48px;
+        color-scheme: dark;
+      }
+      body {
+        margin: 0; color: var(--fg); background:
+          radial-gradient(1200px 600px at 10% 10%, #101225, transparent),
+          radial-gradient(900px 500px at 90% 10%, #170f2a, transparent),
+          linear-gradient(180deg, var(--bg), var(--bg2));
+        font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Inter, sans-serif;
+        line-height: 1.35;
+      }
+      a { color: var(--accent); text-decoration: none; }
+      a:hover { text-decoration: underline; }
+      .wrap { max-width: 1100px; margin: 0 auto; padding: 24px; }
+
+      .hero { margin: 0; display: grid; place-items: center; text-align: center; position: relative; }
+      .hero::after { content: ''; position: absolute; left: 50%; transform: translateX(-50%); bottom: -48px; width: min(980px, 96%); height: 160px; background: radial-gradient(520px 100px at 50% 0, #ffffff0a, transparent 75%); pointer-events: none; filter: blur(12px); }
+      .hero-logo { max-width: min(780px, 90%); width: auto; height: auto; max-height: 40dvh; filter: drop-shadow(0 6px 28px #0008); margin-top: var(--section-mt); }
+      .hero-tag { margin-top: 12px; font-size: clamp(44px, 7.5vw, 93px); font-weight: 900; letter-spacing: .3px; }
+      .hero-sub { margin-top: 12px; font-size: clamp(20px, 2.8vw, 26px); font-weight: 700; color: var(--fg); max-width: 860px; }
+      .btn { padding: 14px 18px; border-radius: 14px; border: 1px solid #ffffff22; background: #101421; color: var(--fg); cursor: pointer; font-weight: 700; letter-spacing: .2px; }
+      .btn.primary { background: linear-gradient(135deg, #1b1f33, #0f1a26); border-color: #ffffff33; box-shadow: 0 0 0 1px #ffffff0a inset, 0 0 24px #7afcff20; }
+      .btn:hover { transform: translateY(-1px); box-shadow: 0 6px 18px #0008, 0 0 24px #7afcff33; }
+      .btn.ghost { background: var(--bg); border-color: #ffffff33; box-shadow: none; }
+      .btn.ghost:hover { transform: translateY(-1px); box-shadow: 0 6px 18px #0006; border-color: #ffffff55; }
+      .btn.readme { color: #ff8a50; border-color: #ff6a4a; }
+      .btn.readme:hover { box-shadow: 0 6px 18px #0006, 0 0 16px 2px rgba(255, 72, 32, 0.25); border-color: #ff8a50; color: #ff9b6a; }
+
+      /* Try It (single‑button) */
+      .try { margin: var(--section-mt) 0 0; padding: 0; border: 0; background: none; backdrop-filter: none; display: grid; gap: 0; justify-items: center; position: relative; }
+      .try::before { content: ''; position: absolute; top: -24px; left: 50%; transform: translateX(-50%); width: min(980px, 96%); height: 80px; background: radial-gradient(520px 80px at 50% 0, #ffffff06, transparent 75%); pointer-events: none; filter: blur(10px); }
+      .pill { padding: 6px 10px; border-radius: 999px; border: 1px solid #ffffff1f; font-size: 12px; color: var(--muted); }
+      progress { width: min(420px, 90%); height: 12px; margin-top: var(--section-mt); }
+      .hidden { display: none; }
+      .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; font-size: 13px; margin: 0; }
+      .small { font-size: 13px; color: var(--muted); }
+      .sizes { font-size: clamp(18px, 3vw, 28px); color: var(--fg); }
+      .sizes strong { font-weight: 900; }
+      .sizes { margin-top: 8px; }
+
+      #tryBtn {
+        font-size: clamp(18px, 2.8vw, 26px);
+        padding: 18px 32px;
+        border-radius: 16px;
+        border: 1px solid #ffffff33;
+        background: linear-gradient(135deg, #ff3b3b, #ff8a50);
+        color: #fff;
+        text-shadow: 0 1px 6px #000c;
+        box-shadow: 0 12px 28px #0008, 0 0 64px 12px rgba(255, 66, 48, 0.58);
+      }
+      #tryBtn:hover { transform: translateY(-1px); box-shadow: 0 18px 36px #000a, 0 0 86px 14px rgba(255, 66, 48, 0.65); }
+      #tryBtn:active { transform: translateY(0); }
+
+      /* Features */
+      .features { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; margin: var(--section-mt) 0 0; }
+      .card { padding: 16px; border-radius: 14px; border: 1px solid #ffffff1f; background: #0c0f1b; }
+      .card h3 { margin: 0 0 6px; font-size: 16px; }
+      .card p { margin: 0; color: var(--muted); font-size: 14px; }
+
+      /* Code */
+      pre[class*="language-"] {
+        border-radius: 12px;
+        background: var(--bg);
+        border: 1px solid #ffffff26;
+        box-shadow: none;
+        position: relative;
+        padding: 12px 14px;
+        line-height: 1.4;
+        margin: 0;
+      }
+      pre[class*="language-"] code { line-height: 1.4; }
+      /* bash code blocks with a non-selectable prompt */
+      pre.language-bash { padding-left: 32px; }
+      pre.language-bash::before {
+        content: '$';
+        position: absolute; left: 12px; top: 12px; color: var(--muted);
+        font-family: inherit; font-size: inherit; line-height: inherit;
+        user-select: none; -webkit-user-select: none;
+        pointer-events: none;
+      }
+      /* Install section layout */
+      #install { max-width: 520px; margin: var(--section-mt) auto 0; }
+      #install pre + pre { margin-top: 28px; }
+      #install p { text-align: center; margin-top: var(--section-mt); }
+
+      /* Footer */
+      footer { display: none; }
+
+      /* CRT mode removed */
+
+      /* Responsive */
+      @media (max-width: 860px) {
+        .features { grid-template-columns: 1fr; }
+      }
+      @media (max-width: 400px) {
+        .wrap { padding-left: 8px; padding-right: 8px; }
+        pre[class*="language-"] { padding: 10px 12px; }
+        pre[class*="language-"] code { font-size: 12px; }
+        .mono { font-size: 12px; }
+        #install { padding: 8px 0; }
+      }
+    </style>
+  </head>
+  <body>
+
+    <main class="wrap">
+      <section class="hero">
+        <img src="assets/img/logo.webp" alt="Straight‑to‑Video logo" class="hero-logo" />
+        <div class="hero-tag">Be wise, optimize!</div>
+        <div class="hero-sub">Skip the server and transcode from the comfort of your own home</div>
+      </section>
+
+      <form id="try" class="try" data-controller="straight-to-video" novalidate>
+        <div>
+          <button id="tryBtn" type="button" class="btn primary">Optimize Video</button>
+        </div>
+        <input id="file" class="hidden" aria-label="Video file" data-straight-to-video-target="fileInput" type="file" accept="video/*" />
+        <progress id="p" class="hidden" max="100" value="0" aria-label="Progress"></progress>
+        <div id="sizes" class="sizes hidden" aria-live="polite"></div>
+        <div>
+          <a id="download" class="hidden">Download</a>
+        </div>
+        <pre id="out" class="mono"></pre>
+      </form>
+
+      <section class="features">
+        <div class="card">
+          <h3>Faster user experience</h3>
+          <p>Modern browsers can <a href="https://developer.mozilla.org/en-US/docs/Web/API/WebCodecs_API" target="_blank" rel="noopener">encode video</a> faster than ancient ISPs can upload large files.</p>
+        </div>
+        <div class="card">
+          <h3>Ready to share</h3>
+          <p>Videos are optimized to <a href="https://developers.facebook.com/docs/instagram-platform/instagram-graph-api/reference/ig-user/media#video-specifications" target="_blank" rel="noopener">Instagram's specifications</a>—no server-side transcoding!</p>
+        </div>
+        <div class="card">
+          <h3>Stimulus support</h3>
+          <p>The bundled <a href="https://stimulus.hotwired.dev/" target="_blank" rel="noopener">Stimulus</a> controller can be wired up in two lines of JavaScript.</p>
+        </div>
+      </section>
+
+      <section id="install">
+        <h2>Install</h2>
+<pre class="language-bash"><code>npm install straight-to-video</code></pre>
+<pre class="language-bash"><code>bin/importmap pin straight-to-video</code></pre>
+        <p>
+          <a class="btn ghost readme" href="https://github.com/searlsco/straight-to-video" target="_blank" rel="noopener">View README</a>
+      </p>
+      </section>
+    </main>
+
+    <script type="module">
+      import { Application, Controller } from '@hotwired/stimulus'
+      import { registerStraightToVideoController } from 'straight-to-video'
+
+      const app = Application.start()
+      registerStraightToVideoController(app, { Controller })
+
+      const form = document.getElementById('try')
+      const fileEl = document.getElementById('file')
+      const tryBtn = document.getElementById('tryBtn')
+      const p = document.getElementById('p')
+      const pct = document.getElementById('pct')
+      const out = document.getElementById('out')
+      const dl = document.getElementById('download')
+      const sizes = document.getElementById('sizes')
+
+      // Removed environment badge
+
+      // Single‑button flow: open picker then auto‑submit
+      tryBtn.addEventListener('click', () => {
+        if (fileEl.showPicker) { try { fileEl.showPicker(); return } catch (_) {} }
+        fileEl.click()
+      })
+
+      let beforeSize = 0
+      fileEl.addEventListener('change', () => {
+        if (!(fileEl.files && fileEl.files.length)) return
+        beforeSize = fileEl.files[0].size || 0
+        sizes.classList.remove('hidden')
+        p.classList.remove('hidden')
+        pct && (pct.textContent = '0%')
+        try { form.requestSubmit() } catch (_) {}
+      })
+
+      // Mirror controller events into the UI
+      fileEl.addEventListener('straight-to-video:progress', (e) => {
+        const v = Math.max(0, Math.min(100, e.detail?.progress ?? 0))
+        p.value = v; if (pct) pct.textContent = `${v}%`
+      })
+      fileEl.addEventListener('straight-to-video:error', (e) => {
+        out.textContent = `Error: ${e.detail?.error?.message || e.detail?.error}`
+      })
+      fileEl.addEventListener('straight-to-video:done', () => {
+        const f = fileEl.files?.[0]
+        if (!f) return
+        const url = URL.createObjectURL(f)
+        dl.href = url
+        dl.download = f.name || 'video-optimized.mp4'
+        dl.textContent = `Download ${dl.download}`
+        dl.classList.remove('hidden')
+        const afterSize = f.size || 0
+        const saved = Math.max(0, beforeSize - afterSize)
+        const pctSaved = beforeSize > 0 ? Math.round((saved / beforeSize) * 100) : 0
+        const fmt = (b) => (b / (1024 * 1024)).toFixed(2) + ' MB'
+        sizes.innerHTML = `Before: <strong>${fmt(beforeSize)}</strong> • After: <strong>${fmt(afterSize)}</strong> • Saved: <strong>${pctSaved}%</strong>`
+        out.textContent = ''
+        setTimeout(() => dl.click(), 150)
+      })
+
+      // Prevent navigation; controller will optimize on submit and we auto-download above
+      form.addEventListener('submit', (e) => e.preventDefault())
+    </script>
+    <script src="https://cdn.jsdelivr.net/npm/prismjs@1.29.0/prism.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/prismjs@1.29.0/components/prism-json.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/prismjs@1.29.0/components/prism-javascript.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/prismjs@1.29.0/components/prism-markup.min.js"></script>
+  </body>
+  </html>

@@ -1,0 +1,101 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>straight-to-video — optimize</title>
+    <script type="importmap">
+    {
+      "imports": {
+        "straight-to-video": "/index.js",
+        "@hotwired/stimulus": "/node_modules/@hotwired/stimulus/dist/stimulus.js",
+        "mediabunny": "/node_modules/mediabunny/dist/modules/src/index.js",
+        "node:fs/promises": "/test/shims/empty.js"
+      }
+    }
+    </script>
+    <style>
+      body { font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; margin: 2rem; }
+      .row { margin-block: 1rem; }
+      progress { width: 300px; }
+    </style>
+  </head>
+  <body>
+    <h1>straight-to-video — optimize + upload</h1>
+    <form id="demo-form">
+      <div class="row">
+        <label for="file">Video file</label>
+        <input id="file" type="file" accept="video/*" />
+        <label style="margin-left:1rem"><input id="use-no-ct" type="checkbox" /> Use fixture with missing Content-Type</label>
+      </div>
+      <div class="row">
+        <button type="submit">Optimize + upload</button>
+        <button id="check-feas" type="button">Feasibility (no upload)</button>
+      </div>
+    </form>
+    <div class="row">
+      <progress id="p" max="100" value="0"></progress>
+      <span id="pct">0%</span>
+    </div>
+    <pre id="out"></pre>
+
+    <script type="module">
+      import { canOptimizeVideo, optimizeVideo } from 'straight-to-video'
+      const p = document.getElementById('p')
+      const pct = document.getElementById('pct')
+      const out = document.getElementById('out')
+      const form = document.getElementById('demo-form')
+      const input = document.getElementById('file')
+      const useNoCt = document.getElementById('use-no-ct')
+
+      form.addEventListener('submit', async (e) => {
+        e.preventDefault()
+        out.textContent = ''
+        p.value = 0; pct.textContent = '0%'
+        let f = input.files?.[0]
+        if (!f && !useNoCt.checked) { out.textContent = 'no file selected'; return }
+        try {
+          let srcFile = f
+          if (useNoCt.checked) {
+            const res = await fetch('/no-ct/test/fixtures/4k_16_9.mp4')
+            const blob = await res.blob() // blob.type will be '' due to missing header
+            srcFile = new File([blob], '4k_16_9.mp4') // no explicit type
+          }
+          const feas = await canOptimizeVideo(srcFile)
+          let outFile = srcFile
+          if (feas.ok) {
+            const r = await optimizeVideo(srcFile, { onProgress: (r) => { p.value = Math.round(r * 100); pct.textContent = `${Math.round(r * 100)}%` } })
+            outFile = r.file
+          }
+          const up = await fetch('/upload', {
+            method: 'POST',
+            body: outFile,
+            headers: { 'Content-Type': outFile.type || 'application/octet-stream', 'X-Filename': outFile.name }
+          })
+          const json = await up.json()
+          out.textContent = JSON.stringify(json)
+        } catch (e) {
+          out.textContent = `optimize error: ${e?.message || e}`
+        }
+      })
+
+      document.getElementById('check-feas').addEventListener('click', async () => {
+        out.textContent = ''
+        let f = input.files?.[0]
+        if (!f && !useNoCt.checked) { out.textContent = JSON.stringify({ ok: false, reason: 'no-file' }); return }
+        try {
+          let srcFile = f
+          if (useNoCt.checked) {
+            const res = await fetch('/no-ct/test/fixtures/4k_16_9.mp4')
+            const blob = await res.blob()
+            srcFile = new File([blob], '4k_16_9.mp4')
+          }
+          const feas = await canOptimizeVideo(srcFile)
+          out.textContent = JSON.stringify(feas)
+        } catch (e) {
+          out.textContent = JSON.stringify({ ok: false, error: e?.message || String(e) })
+        }
+      })
+    </script>
+  </body>
+  </html>

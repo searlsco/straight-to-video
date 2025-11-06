@@ -1,0 +1,46 @@
+{
+  "name": "straight-to-video",
+  "version": "0.0.1",
+  "description": "ESM-only browser module: client-side optimization helpers + Stimulus controller.",
+  "type": "module",
+  "exports": {
+    ".": "./index.js"
+  },
+  "peerDependencies": {
+    "@hotwired/stimulus": "^3.2.0"
+  },
+  "peerDependenciesMeta": {
+    "@hotwired/stimulus": {
+      "optional": true
+    }
+  },
+  "dependencies": {
+    "mediabunny": "^1.24.4"
+  },
+  "keywords": [
+    "esm",
+    "stimulus",
+    "video",
+    "upload",
+    "importmap",
+    "rails"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/searlsco/straight-to-video.git"
+  },
+  "license": "MIT",
+  "files": [
+    "index.js",
+    "README.md",
+    "LICENSE.txt"
+  ],
+  "scripts": {
+    "dev": "node test/pages/server.js",
+    "test": "script/test"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.56.1",
+    "busboy": "^1.6.0"
+  }
+}

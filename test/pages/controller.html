@@ -1,0 +1,118 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>straight-to-video — basic</title>
+    <script type="importmap">
+    {
+      "imports": {
+        "straight-to-video": "/index.js",
+        "@hotwired/stimulus": "/node_modules/@hotwired/stimulus/dist/stimulus.js",
+        "mediabunny": "/node_modules/mediabunny/dist/modules/src/index.js",
+        "node:fs/promises": "/test/shims/empty.js"
+      }
+    }
+    </script>
+    <style>
+      body { font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; margin: 2rem; }
+      .row { margin-block: 1rem; }
+      progress { width: 300px; }
+    </style>
+  </head>
+  <body>
+    <h1>straight-to-video — basic import test</h1>
+    <div class="row">
+      <form data-controller="straight-to-video" id="demo-form">
+        <label for="file">Video file</label>
+        <input data-straight-to-video-target="fileInput" data-action="change->straight-to-video#change" id="file" type="file" accept="video/*" />
+        <button type="submit">Submit</button>
+      </form>
+    </div>
+    <div class="row">
+      <button id="run-fixture">Run with fixture (4k_16_9.mp4)</button>
+      <button id="run-upload">Optimize + upload to /upload</button>
+    </div>
+    <div class="row">
+      <progress id="p" max="100" value="0"></progress>
+      <span id="pct">0%</span>
+    </div>
+    <pre id="out"></pre>
+
+    <script type="module">
+      import { Application, Controller } from '@hotwired/stimulus'
+      import { registerStraightToVideoController, canOptimizeVideo, optimizeVideo } from 'straight-to-video'
+
+      const app = Application.start()
+      registerStraightToVideoController(app, { Controller })
+
+      const p = document.getElementById('p')
+      const pct = document.getElementById('pct')
+      const out = document.getElementById('out')
+      const file = document.getElementById('file')
+
+      file.addEventListener('straight-to-video:progress', (e) => {
+        p.value = e.detail.progress
+        pct.textContent = `${e.detail.progress}%`
+      })
+      file.addEventListener('straight-to-video:error', (e) => {
+        out.textContent = `error: ${e.detail?.error?.message || e.detail?.error}`
+      })
+      file.addEventListener('straight-to-video:done', (e) => {
+        out.textContent = `done. changed=${e.detail.changed}`
+      })
+
+      // Also poke the direct API so we know the imports work
+      file.addEventListener('change', async () => {
+        const f = file.files?.[0]
+        if (!f) return
+        const feas = await canOptimizeVideo(f)
+        console.log('canOptimize', feas)
+        try {
+          const { changed, file: outFile } = await optimizeVideo(f, { onProgress: (r) => {
+            p.value = Math.round(r * 100)
+            pct.textContent = `${Math.round(r * 100)}%`
+          } })
+          console.log('optimize result', { changed, outFile })
+        } catch (e) {
+          console.error('optimize failed (expected until implemented):', e)
+        }
+      })
+
+      document.getElementById('run-fixture').addEventListener('click', async () => {
+        out.textContent = 'running fixture...'
+        const res = await fetch('/test/fixtures/4k_16_9.mp4')
+        const blob = await res.blob()
+        const f = new File([blob], '4k_16_9.mp4', { type: 'video/mp4' })
+        const feas = await canOptimizeVideo(f)
+        out.textContent = `fixture canOptimize: ${JSON.stringify(feas)}`
+        try {
+          const { changed, file: outFile } = await optimizeVideo(f, { onProgress: (r) => {
+            p.value = Math.round(r * 100)
+            pct.textContent = `${Math.round(r * 100)}%`
+          } })
+          out.textContent = `fixture optimize: changed=${changed}, name=${outFile?.name}`
+        } catch (e) {
+          out.textContent = `fixture optimize error: ${e?.message || e}`
+        }
+      })
+
+      document.getElementById('run-upload').addEventListener('click', async () => {
+        out.textContent = 'preparing upload...'
+        const res = await fetch('/test/fixtures/4k_16_9.mp4')
+        const blob = await res.blob()
+        const f = new File([blob], '4k_16_9.mp4', { type: 'video/mp4' })
+        const { changed, file: outFile } = await optimizeVideo(f, { onProgress: (r) => {
+          p.value = Math.round(r * 100)
+          pct.textContent = `${Math.round(r * 100)}%`
+        } })
+        out.textContent = 'uploading...'
+        const fd = new FormData()
+        fd.append('file', outFile)
+        const up = await fetch('/upload', { method: 'POST', body: fd })
+        const json = await up.json()
+        out.textContent = `upload: ${JSON.stringify(json)}`
+      })
+    </script>
+  </body>
+  </html>

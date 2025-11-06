@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+
+set -uo pipefail
+
+# Always execute from repo root so relative paths in config work
+cd "$(dirname "$0")/.."
+
+# If running in CI, force headless via the config's HEADLESS env toggle
+if [[ "${CI:-}" == "true" ]]; then
+  export HEADLESS=1
+fi
+
+# Run tests (pass through any extra args)
+npx playwright test "$@"
