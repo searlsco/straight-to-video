@@ -1,5 +1,7 @@
 <p align="center">
   <img width="480" align="center" src="assets/img/logo.webp" alt="straight-to-video VHS Logo">
+  <br>
+  Check out the <a href="https://searlsco.github.io/straight-to-video/">interactive demo page</a>!
 </p>
 
 # straight-to-video
