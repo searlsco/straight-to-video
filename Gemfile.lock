@@ -1,7 +1,7 @@
 PATH
   remote: .
   specs:
-    straight_to_video (0.0.3)
+    straight_to_video (0.0.4)
       railties (>= 7, < 9)
 
 GEM

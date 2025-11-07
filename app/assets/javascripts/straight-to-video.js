@@ -1,4 +1,4 @@
-// straight-to-video@0.0.3 vendored by the straight_to_video gem
+// straight-to-video@0.0.4 vendored by the straight_to_video gem
 // straight-to-video - https://github.com/searlsco/straight-to-video
 
 // ----- External imports -----
