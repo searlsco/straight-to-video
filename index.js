@@ -85,12 +85,12 @@ function interleaveStereoF32 (buffer) {
 
 // ----- Video pipeline -----
 async function canOptimizeVideo (file) {
-  if (!(file instanceof File)) return { ok: false, reason: 'not-a-file', details: {} }
+  if (!(file instanceof File)) return { ok: false, reason: 'not-a-file', message: 'Argument provided is not a File.' }
   const env = typeof window !== 'undefined'
     && 'VideoEncoder' in window
     && 'OfflineAudioContext' in window
     && typeof document?.createElement === 'function'
-  if (!env) return { ok: false, reason: 'unsupported-environment', details: {} }
+  if (!env) return { ok: false, reason: 'unsupported-environment', message: 'Browser does not support WebCodecs or OfflineAudioContext.' }
   try {
     const { width, height, duration } = await probeVideo(file)
     const long = Math.max(width, height)
@@ -99,7 +99,7 @@ async function canOptimizeVideo (file) {
     const targetHeight = Math.max(2, Math.round(height * scale))
     const fps = Math.max(width, height) <= 1920 ? 30 : 60
     const sup = await selectVideoEncoderConfig({ width: targetWidth, height: targetHeight, fps }).then(() => true).catch(() => false)
-    if (!sup) return { ok: false, reason: 'unsupported-video-config', details: { width, height } }
+    if (!sup) return { ok: false, reason: 'unsupported-video-config', message: 'No supported encoder configuration for this resolution on this device.' }
 
     // Header sniffing when file.type is empty/incorrect
     const type = String(file.type || '').toLowerCase()
@@ -112,13 +112,11 @@ async function canOptimizeVideo (file) {
       const hasFtyp = ascii.includes('ftyp')
       // WebM/Matroska: EBML header 1A 45 DF A3
       const hasEbml = buf.length >= 4 && buf[0] === 0x1A && buf[1] === 0x45 && buf[2] === 0xDF && buf[3] === 0xA3
-      if (!(hasFtyp || hasEbml)) return { ok: false, reason: 'unknown-container', details: {} }
+      if (!(hasFtyp || hasEbml)) return { ok: false, reason: 'unknown-container', message: 'Unrecognized container; expected MP4/MOV or WebM.' }
     }
-    const mbPerSec = 0.366
-    if ((duration * mbPerSec) > 300 /* ~300MB budget */) return { ok: false, reason: 'too-long', details: { duration } }
-    return { ok: true, reason: 'ok', details: { width, height, duration } }
+    return { ok: true, reason: 'ok', message: 'ok' }
   } catch (e) {
-    return { ok: false, reason: 'probe-failed', details: { error: String(e?.message || e) } }
+    return { ok: false, reason: 'probe-failed', message: String(e?.message || e) }
   }
 }
 

@@ -33,7 +33,9 @@
   "files": [
     "index.js",
     "README.md",
-    "LICENSE.txt"
+    "LICENSE.txt",
+    "CHANGELOG.md",
+    "assets/img/logo.webp"
   ],
   "scripts": {
     "dev": "node test/pages/server.js",
