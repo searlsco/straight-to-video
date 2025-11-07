@@ -179,7 +179,12 @@
 
     <script type="module">
       import { Application, Controller } from '@hotwired/stimulus'
-      import { registerStraightToVideoController } from 'straight-to-video'
+      import { canOptimizeVideo, optimizeVideo, registerStraightToVideoController } from 'straight-to-video'
+
+      // Declare as global so that people can play with them
+      window.canOptimizeVideo = canOptimizeVideo
+      window.optimizeVideo = optimizeVideo
+      window.registerStraightToVideoController = registerStraightToVideoController
 
       const app = Application.start()
       registerStraightToVideoController(app, { Controller })
@@ -192,8 +197,6 @@
       const out = document.getElementById('out')
       const dl = document.getElementById('download')
       const sizes = document.getElementById('sizes')
-
-      // Removed environment badge
 
       // Single‑button flow: open picker then auto‑submit
       tryBtn.addEventListener('click', () => {
