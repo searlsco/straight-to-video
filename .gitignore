@@ -4,3 +4,4 @@ test-results/
 .playwright-artifacts-*/
 test/tmp/
 /tmp
+/pkg

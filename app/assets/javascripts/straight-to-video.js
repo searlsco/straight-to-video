@@ -1,9 +1,5 @@
-// straight-to-video@0.0.2 vendored by the straight_to_video gem
-// Single‑file ESM entry for importmap users.
-// Pulls in all internal modules so apps can pin just `straight-to-video`.
-
-// External deps remain peer/regular deps and should be pinned/available separately
-// in importmap environments: `@hotwired/stimulus` and `mediabunny`.
+// straight-to-video@0.0.3 vendored by the straight_to_video gem
+// straight-to-video - https://github.com/searlsco/straight-to-video
 
 // ----- External imports -----
 import {

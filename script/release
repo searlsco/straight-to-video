@@ -53,8 +53,11 @@ mv "$tmp_file" "$RB_VERSION_FILE"
 # Vendor javascript files (reflect new version in headers)
 ./script/vendor
 
+# Bump the version in the Gemfile.lock
+bundle
+
 # Commit version bumps as a single commit; bundler's rake release will tag
-git add package.json package-lock.json "$RB_VERSION_FILE" app/assets/javascripts
+git add package.json package-lock.json Gemfile.lock "$RB_VERSION_FILE" app/assets/javascripts
 git commit -m "$VERSION"
 
 # Publish to npm
