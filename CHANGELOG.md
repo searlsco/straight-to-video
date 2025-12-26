@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.0.8
 
 - fix periodic frame jutter by selecting source frames using mid-frame timestamps instead of boundary timestamps
 - improve cadence on some iPhone MOVs by decoding frames via WebCodecs (Mediabunny `VideoSampleSink`) instead of per-frame `<video>` seeks
