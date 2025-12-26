@@ -119,7 +119,7 @@ async function canOptimizeVideo (file) {
 async function optimizeVideo (file, { onProgress } = {}) {
   if (!(file instanceof File)) return { changed: false, file }
   const type = file.type || ''
-  if (!/^video\//i.test(type)) return { changed: false, file }
+  if (type && !/^video\//i.test(type)) return { changed: false, file }
   if (typeof window === 'undefined' || !('VideoEncoder' in window)) return { changed: false, file }
   const feas = await canOptimizeVideo(file)
   if (!feas.ok) return { changed: false, file }

@@ -201,6 +201,17 @@ test('canOptimize header sniff + feasibility path', async ({ page }) => {
   expect(feas.reason).not.toBe('unknown-container')
 })
 
+test('missing Content-Type fixture still optimizes', async ({ page }) => {
+  await page.goto('/test/pages/optimize.html')
+
+  const json = await submitViaForm(page, 'test/fixtures/4k_16_9.mp4', { useNoContentTypeFixture: true })
+
+  const s = json.summary
+  expect(Boolean(s.moov_front)).toBe(true)
+  expect(String(json.file?.content_type)).toContain('video/mp4')
+  expect(String(json.file?.name)).toMatch(/-optimized\.mp4$/)
+})
+
 test('1080p portrait MP4 optimizes to spec (2k_9_16.mp4)', async ({ page }) => {
   const input = 'test/fixtures/2k_9_16.mp4'
   await page.goto('/test/pages/optimize.html')
