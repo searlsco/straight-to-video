@@ -148,6 +148,20 @@ async function waitForFrameReady (video, budgetMs) {
   })
 }
 
+async function seekOnce (video, time) {
+  if (!video) return
+  const t = Number.isFinite(time) ? time : 0
+  if (Math.abs(video.currentTime - t) < 1e-6) return
+  await new Promise((resolve) => {
+    const onSeeked = () => {
+      video.removeEventListener('seeked', onSeeked)
+      resolve()
+    }
+    video.addEventListener('seeked', onSeeked, { once: true })
+    video.currentTime = t
+  })
+}
+
 async function encodeVideo ({ file, srcMeta, onProgress }) {
   const w = srcMeta.w
   const h = srcMeta.h
@@ -204,8 +218,26 @@ async function encodeVideo ({ file, srcMeta, onProgress }) {
   const url = URL.createObjectURL(file)
   const v = document.createElement('video')
   v.muted = true; v.preload = 'auto'; v.playsInline = true
-  v.src = url
-  await new Promise((resolve, reject) => { v.onloadedmetadata = resolve; v.onerror = () => reject(new Error('video load failed')) })
+  await new Promise((resolve, reject) => {
+    const onLoaded = () => {
+      v.removeEventListener('loadedmetadata', onLoaded)
+      v.removeEventListener('error', onError)
+      resolve()
+    }
+    const onError = () => {
+      v.removeEventListener('loadedmetadata', onLoaded)
+      v.removeEventListener('error', onError)
+      reject(new Error('video load failed'))
+    }
+    v.addEventListener('loadedmetadata', onLoaded)
+    v.addEventListener('error', onError)
+    v.src = url
+    try {
+      v.load()
+    } catch (err) {
+      console.warn('straight-to-video: video.load() threw; continuing without explicit load()', err)
+    }
+  })
   const canvas = document.createElement('canvas'); canvas.width = targetWidth; canvas.height = targetHeight
   const ctx = canvas.getContext('2d', { alpha: false })
 
@@ -215,13 +247,13 @@ async function encodeVideo ({ file, srcMeta, onProgress }) {
     const drawTime = i === 0
       ? Math.min(Math.max(0, t + (step * 0.5)), Math.max(0.000001, durationCfr - 0.000001))
       : targetTime
-
-    await new Promise((resolve) => { v.currentTime = drawTime; v.onseeked = () => resolve() })
+    await seekOnce(v, drawTime)
     const budgetMs = Math.min(34, Math.max(17, Math.round(step * 1000)))
     const presented = await waitForFrameReady(v, budgetMs)
     if (!presented && i === 0) {
       const nudge = Math.min(step * 0.25, 0.004)
-      await new Promise((resolve) => { v.currentTime = Math.min(drawTime + nudge, Math.max(0.000001, durationCfr - 0.000001)); v.onseeked = () => resolve() })
+      const target = Math.min(drawTime + nudge, Math.max(0.000001, durationCfr - 0.000001))
+      await seekOnce(v, target)
     }
 
     ctx.drawImage(v, 0, 0, canvas.width, canvas.height)
@@ -230,7 +262,11 @@ async function encodeVideo ({ file, srcMeta, onProgress }) {
     vf.close()
 
     if (typeof onProgress === 'function') {
-      try { onProgress(Math.min(1, (i + 1) / frames)) } catch (_) {}
+      try {
+        onProgress(Math.min(1, (i + 1) / frames))
+      } catch (err) {
+        console.warn('straight-to-video: onProgress callback threw; ignoring error', err)
+      }
     }
   }
   await ve.flush()
@@ -254,7 +290,6 @@ async function encodeVideo ({ file, srcMeta, onProgress }) {
   const sample = new AudioSample({ format: 'f32', sampleRate: TARGET_AUDIO_SR, numberOfChannels: TARGET_AUDIO_CHANNELS, timestamp: 0, data: interleaved })
   await audioSource.add(sample)
   audioSource.close()
-
   await output.finalize()
   const { buffer } = output.target
   const payload = new Uint8Array(buffer)
@@ -322,6 +357,11 @@ function registerStraightToVideoController (app, opts = {}) {
     }
 
     async _processFileInput (fileInput) {
+      if (!this._pendingProcesses) this._pendingProcesses = new WeakMap()
+      const existing = this._pendingProcesses.get(fileInput)
+      if (existing) return existing
+
+      const job = (async () => {
       this._markFlag(fileInput, 'processing')
       fileInput.disabled = true
       try {
@@ -340,6 +380,13 @@ function registerStraightToVideoController (app, opts = {}) {
         fileInput.disabled = false
         this._unmarkFlag(fileInput, 'processing')
       }
+      })()
+
+      this._pendingProcesses.set(fileInput, job)
+      job.finally(() => {
+        if (this._pendingProcesses?.get(fileInput) === job) this._pendingProcesses.delete(fileInput)
+      })
+      return job
     }
 
     _fire (el, name, detail = {}) {

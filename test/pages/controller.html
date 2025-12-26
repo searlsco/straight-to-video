@@ -18,6 +18,8 @@
       body { font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; margin: 2rem; }
       .row { margin-block: 1rem; }
       progress { width: 300px; }
+      pre { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; font-size: 12px; white-space: pre-wrap; border: 1px solid #ddd; padding: 8px; border-radius: 4px; max-height: 260px; overflow: auto; }
+      #log { margin-top: 0.5rem; }
     </style>
   </head>
   <body>
@@ -37,7 +39,15 @@
       <progress id="p" max="100" value="0"></progress>
       <span id="pct">0%</span>
     </div>
+    <div class="row">
+      <button id="clear-log" type="button">Clear log</button>
+      <button id="copy-log" type="button">Copy log</button>
+    </div>
+    <div class="row">
+      <a id="download" href="#" download style="display:none">Download optimized</a>
+    </div>
     <pre id="out"></pre>
+    <pre id="log" aria-label="Debug log"></pre>
 
     <script type="module">
       import { Application, Controller } from '@hotwired/stimulus'
@@ -50,32 +60,129 @@
       const pct = document.getElementById('pct')
       const out = document.getElementById('out')
       const file = document.getElementById('file')
+      const downloadLink = document.getElementById('download')
+      const logEl = document.getElementById('log')
+      const clearLogButton = document.getElementById('clear-log')
+      const copyLogButton = document.getElementById('copy-log')
+
+      const LOG_KEY = 'straight_to_video_controller_log'
+
+      function nowStamp () {
+        const d = new Date()
+        return d.toISOString().split('T')[1].replace('Z', '')
+      }
+
+      function formatValue (value) {
+        if (value === null || value === undefined) return String(value)
+        if (typeof value === 'string') return value
+        if (typeof value === 'number' || typeof value === 'boolean') return String(value)
+        if (value instanceof Error) return `${value.name}: ${value.message}`
+        try { return JSON.stringify(value) } catch (_) { return String(value) }
+      }
+
+      function appendLog (label, detail) {
+        const prefix = `[${nowStamp()}] ${label}`
+        const line = detail === undefined ? prefix : `${prefix} ${formatValue(detail)}`
+        console.log('[controller-debug]', label, detail)
+        logEl.textContent += line + '\n'
+        logEl.scrollTop = logEl.scrollHeight
+        try {
+          sessionStorage.setItem(LOG_KEY, logEl.textContent)
+        } catch (err) {
+          console.warn('[controller-debug] failed to persist log to sessionStorage', err)
+        }
+      }
+
+      try {
+        const saved = sessionStorage.getItem(LOG_KEY)
+        if (saved) {
+          logEl.textContent = saved
+          logEl.scrollTop = logEl.scrollHeight
+        }
+      } catch (err) {
+        console.warn('[controller-debug] failed to restore log from sessionStorage', err)
+      }
+
+      clearLogButton.addEventListener('click', () => {
+        logEl.textContent = ''
+        try {
+          sessionStorage.setItem(LOG_KEY, '')
+        } catch (err) {
+          console.warn('[controller-debug] failed to clear persisted log in sessionStorage', err)
+        }
+      })
+
+      copyLogButton.addEventListener('click', async () => {
+        const text = logEl.textContent || ''
+        if (!text) {
+          appendLog('copyLog.empty', 'no log text to copy')
+          return
+        }
+        try {
+          if (navigator.clipboard && navigator.clipboard.writeText) {
+            await navigator.clipboard.writeText(text)
+            appendLog('copyLog.success', { length: text.length, via: 'clipboard' })
+          } else {
+            const range = document.createRange()
+            range.selectNodeContents(logEl)
+            const selection = window.getSelection()
+            selection.removeAllRanges()
+            selection.addRange(range)
+            const ok = document.execCommand('copy')
+            selection.removeAllRanges()
+            appendLog(ok ? 'copyLog.success' : 'copyLog.error', { length: text.length, via: 'execCommand' })
+          }
+        } catch (e) {
+          appendLog('copyLog.error', e)
+        }
+      })
+
+      window.straightToVideoDebug = (label, detail) => {
+        appendLog(`internal.${label}`, detail)
+      }
 
       file.addEventListener('straight-to-video:progress', (e) => {
-        p.value = e.detail.progress
-        pct.textContent = `${e.detail.progress}%`
+        const progress = e.detail.progress
+        p.value = progress
+        pct.textContent = `${progress}%`
+        appendLog('file.progress.event', { progress })
       })
       file.addEventListener('straight-to-video:error', (e) => {
-        out.textContent = `error: ${e.detail?.error?.message || e.detail?.error}`
+        const message = e.detail?.error?.message || e.detail?.error
+        out.textContent = `error: ${message}`
+        appendLog('file.error.event', { message })
       })
       file.addEventListener('straight-to-video:done', (e) => {
-        out.textContent = `done. changed=${e.detail.changed}`
-      })
+        const changed = e.detail.changed
+        out.textContent = `done. changed=${changed}`
+        appendLog('file.done.event', { changed })
 
-      // Also poke the direct API so we know the imports work
-      file.addEventListener('change', async () => {
-        const f = file.files?.[0]
-        if (!f) return
-        const feas = await canOptimizeVideo(f)
-        console.log('canOptimize', feas)
+        if (!downloadLink) return
         try {
-          const { changed, file: outFile } = await optimizeVideo(f, { onProgress: (r) => {
-            p.value = Math.round(r * 100)
-            pct.textContent = `${Math.round(r * 100)}%`
-          } })
-          console.log('optimize result', { changed, outFile })
-        } catch (e) {
-          console.error('optimize failed (expected until implemented):', e)
+          URL.revokeObjectURL(downloadLink.href)
+        } catch (err) {
+          console.warn('[controller-debug] URL.revokeObjectURL failed; continuing', err)
+        }
+        if (!changed || !file.files?.length) {
+          downloadLink.style.display = 'none'
+          downloadLink.removeAttribute('href')
+          downloadLink.removeAttribute('download')
+          return
+        }
+
+        try {
+          const optimized = file.files[0]
+          const url = URL.createObjectURL(optimized)
+          downloadLink.href = url
+          downloadLink.download = optimized.name || 'video-optimized.mp4'
+          downloadLink.textContent = `Download ${downloadLink.download}`
+          downloadLink.style.display = 'inline'
+          appendLog('file.download.link', {
+            name: downloadLink.download,
+            hrefLength: downloadLink.href?.length || 0
+          })
+        } catch (err) {
+          appendLog('file.download.error', err)
         }
       })
 

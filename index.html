@@ -200,7 +200,14 @@
 
       // Single‑button flow: open picker then auto‑submit
       tryBtn.addEventListener('click', () => {
-        if (fileEl.showPicker) { try { fileEl.showPicker(); return } catch (_) {} }
+        if (fileEl.showPicker) {
+          try {
+            fileEl.showPicker()
+            return
+          } catch (err) {
+            console.warn('straight-to-video demo: file input showPicker() failed; falling back to click()', err)
+          }
+        }
         fileEl.click()
       })
 
@@ -211,7 +218,11 @@
         sizes.classList.remove('hidden')
         p.classList.remove('hidden')
         pct && (pct.textContent = '0%')
-        try { form.requestSubmit() } catch (_) {}
+        try {
+          form.requestSubmit()
+        } catch (err) {
+          console.warn('straight-to-video demo: form.requestSubmit() failed; user may need to submit manually', err)
+        }
       })
 
       // Mirror controller events into the UI

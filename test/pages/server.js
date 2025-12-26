@@ -132,6 +132,7 @@ const server = http.createServer(async (req, res) => {
     const u = new URL(req.url || '/', `http://localhost:${port}`)
     let path = decodeURIComponent(u.pathname || '/')
     if (path === '/') path = '/test/pages/optimize.html'
+    if (path === '/demo' || path === '/demo/') path = '/index.html'
     // Serve a file without Content-Type header to simulate missing MIME type
     if (req.method === 'GET' && path.startsWith('/no-ct/')) {
       const rel = path.replace(/^\/no-ct\//, '')
@@ -162,6 +163,6 @@ const server = http.createServer(async (req, res) => {
   }
 })
 
-server.listen(port, () => {
+server.listen(port, '0.0.0.0', () => {
   console.log(`serving ${root} on http://localhost:${port}`)
 })

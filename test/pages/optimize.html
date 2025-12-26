@@ -18,6 +18,8 @@
       body { font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; margin: 2rem; }
       .row { margin-block: 1rem; }
       progress { width: 300px; }
+      pre { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; font-size: 12px; white-space: pre-wrap; border: 1px solid #ddd; padding: 8px; border-radius: 4px; max-height: 260px; overflow: auto; }
+      #log { margin-top: 0.5rem; }
     </style>
   </head>
   <body>
@@ -37,36 +39,182 @@
       <progress id="p" max="100" value="0"></progress>
       <span id="pct">0%</span>
     </div>
+    <div class="row">
+      <a id="download" href="#" download style="display:none">Download optimized</a>
+    </div>
     <pre id="out"></pre>
+    <div class="row">
+      <button id="clear-log" type="button">Clear log</button>
+      <button id="copy-log" type="button">Copy log</button>
+    </div>
+    <pre id="log" aria-label="Debug log"></pre>
 
     <script type="module">
       import { canOptimizeVideo, optimizeVideo } from 'straight-to-video'
       const p = document.getElementById('p')
       const pct = document.getElementById('pct')
       const out = document.getElementById('out')
+      const dl = document.getElementById('download')
       const form = document.getElementById('demo-form')
       const input = document.getElementById('file')
       const useNoCt = document.getElementById('use-no-ct')
+      const logEl = document.getElementById('log')
+      const clearLogButton = document.getElementById('clear-log')
+      const copyLogButton = document.getElementById('copy-log')
+
+      function nowStamp () {
+        const d = new Date()
+        return d.toISOString().split('T')[1].replace('Z', '')
+      }
+
+      function formatValue (value) {
+        if (value === null || value === undefined) return String(value)
+        if (typeof value === 'string') return value
+        if (typeof value === 'number' || typeof value === 'boolean') return String(value)
+        if (value instanceof Error) return `${value.name}: ${value.message}`
+        try { return JSON.stringify(value) } catch (_) { return String(value) }
+      }
+
+      function appendLog (label, detail) {
+        const prefix = `[${nowStamp()}] ${label}`
+        const line = detail === undefined ? prefix : `${prefix} ${formatValue(detail)}`
+        console.log('[optimize-debug]', label, detail)
+        logEl.textContent += line + '\n'
+        logEl.scrollTop = logEl.scrollHeight
+      }
+
+      clearLogButton.addEventListener('click', () => {
+        logEl.textContent = ''
+      })
+
+      copyLogButton.addEventListener('click', async () => {
+        const text = logEl.textContent || ''
+        if (!text) {
+          appendLog('copyLog.empty', 'no log text to copy')
+          return
+        }
+        try {
+          if (navigator.clipboard && navigator.clipboard.writeText) {
+            await navigator.clipboard.writeText(text)
+            appendLog('copyLog.success', { length: text.length, via: 'clipboard' })
+          } else {
+            const range = document.createRange()
+            range.selectNodeContents(logEl)
+            const selection = window.getSelection()
+            selection.removeAllRanges()
+            selection.addRange(range)
+            const ok = document.execCommand('copy')
+            selection.removeAllRanges()
+            appendLog(ok ? 'copyLog.success' : 'copyLog.error', { length: text.length, via: 'execCommand' })
+          }
+        } catch (e) {
+          appendLog('copyLog.error', e)
+        }
+      })
+
+      window.straightToVideoDebug = (label, detail) => {
+        appendLog(`internal.${label}`, detail)
+      }
+
+      window.addEventListener('error', (e) => {
+        try {
+          appendLog('window.error', {
+            message: e?.message,
+            filename: e?.filename,
+            lineno: e?.lineno,
+            colno: e?.colno
+          })
+        } catch (err) {
+          console.warn('[optimize-debug] failed to append window.error to log', err)
+        }
+      })
+
+      window.addEventListener('unhandledrejection', (e) => {
+        try {
+          appendLog('window.unhandledrejection', {
+            reason: e?.reason && (e.reason.message || String(e.reason))
+          })
+        } catch (err) {
+          console.warn('[optimize-debug] failed to append window.unhandledrejection to log', err)
+        }
+      })
+
+      input.addEventListener('change', () => {
+        const f = input.files?.[0]
+        appendLog('file.change', {
+          name: f?.name,
+          size: f?.size,
+          type: f?.type
+        })
+      })
 
       form.addEventListener('submit', async (e) => {
         e.preventDefault()
         out.textContent = ''
         p.value = 0; pct.textContent = '0%'
+        if (dl) {
+          dl.style.display = 'none'
+          try {
+            URL.revokeObjectURL(dl.href)
+          } catch (err) {
+            console.warn('[optimize-debug] URL.revokeObjectURL failed while clearing download link', err)
+          }
+        }
         let f = input.files?.[0]
-        if (!f && !useNoCt.checked) { out.textContent = 'no file selected'; return }
+        appendLog('submit.start', { hasFile: !!f, useNoCt: !!useNoCt.checked })
+        if (!f && !useNoCt.checked) { out.textContent = 'no file selected'; appendLog('submit.no-file', {}); return }
         try {
           let srcFile = f
           if (useNoCt.checked) {
+            appendLog('submit.use-no-ct.fetch.start', {})
             const res = await fetch('/no-ct/test/fixtures/4k_16_9.mp4')
             const blob = await res.blob() // blob.type will be '' due to missing header
             srcFile = new File([blob], '4k_16_9.mp4') // no explicit type
+            appendLog('submit.use-no-ct.fetch.done', {
+              size: srcFile.size,
+              type: srcFile.type
+            })
           }
           const feas = await canOptimizeVideo(srcFile)
+          appendLog('submit.feasibility', feas)
           let outFile = srcFile
           if (feas.ok) {
-            const r = await optimizeVideo(srcFile, { onProgress: (r) => { p.value = Math.round(r * 100); pct.textContent = `${Math.round(r * 100)}%` } })
+            const r = await optimizeVideo(srcFile, {
+              onProgress: (ratio) => {
+                const percent = Math.round(ratio * 100)
+                p.value = percent
+                pct.textContent = `${percent}%`
+                appendLog('submit.optimize.progress', { percent })
+              }
+            })
             outFile = r.file
+            appendLog('submit.optimize.result', {
+              changed: r.changed,
+              name: outFile?.name,
+              size: outFile?.size,
+              type: outFile?.type
+            })
           }
+          if (dl) {
+            try {
+              const url = URL.createObjectURL(outFile)
+              dl.href = url
+              dl.download = outFile.name || 'video-optimized.mp4'
+              dl.textContent = `Download ${dl.download}`
+              dl.style.display = 'inline'
+              appendLog('submit.download.link', {
+                name: dl.download,
+                hrefLength: dl.href?.length || 0
+              })
+            } catch (err) {
+              console.warn('[optimize-debug] failed to create or update download link', err)
+            }
+          }
+          appendLog('submit.upload.start', {
+            size: outFile.size,
+            type: outFile.type,
+            name: outFile.name
+          })
           const up = await fetch('/upload', {
             method: 'POST',
             body: outFile,
@@ -74,15 +222,18 @@
           })
           const json = await up.json()
           out.textContent = JSON.stringify(json)
+          appendLog('submit.upload.result', json)
         } catch (e) {
           out.textContent = `optimize error: ${e?.message || e}`
+          appendLog('submit.error', e)
         }
       })
 
       document.getElementById('check-feas').addEventListener('click', async () => {
         out.textContent = ''
         let f = input.files?.[0]
-        if (!f && !useNoCt.checked) { out.textContent = JSON.stringify({ ok: false, reason: 'no-file' }); return }
+        appendLog('feasibility.click', { hasFile: !!f, useNoCt: !!useNoCt.checked })
+        if (!f && !useNoCt.checked) { out.textContent = JSON.stringify({ ok: false, reason: 'no-file' }); appendLog('feasibility.no-file', {}); return }
         try {
           let srcFile = f
           if (useNoCt.checked) {
@@ -92,8 +243,10 @@
           }
           const feas = await canOptimizeVideo(srcFile)
           out.textContent = JSON.stringify(feas)
+          appendLog('feasibility.result', feas)
         } catch (e) {
           out.textContent = JSON.stringify({ ok: false, error: e?.message || String(e) })
+          appendLog('feasibility.error', e)
         }
       })
     </script>

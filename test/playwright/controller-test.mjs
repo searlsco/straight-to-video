@@ -30,3 +30,19 @@ test('controller emits progress and done events quickly', async ({ page }) => {
   await expect(pre).toContainText('progress:', { timeout: 30_000 })
   await expect(pre).toContainText('done:', { timeout: 30_000 })
 })
+
+test('controller does not double-process on change + submit', async ({ page }) => {
+  await page.goto('/test/pages/controller.html')
+  await page.getByRole('button', { name: /Clear log/i }).click()
+
+  const input = page.getByLabel(/Video file/i)
+  await input.setInputFiles('test/fixtures/4k_16_9.mp4')
+  await page.getByRole('button', { name: 'Submit' }).click()
+
+  const log = page.locator('#log')
+  await expect(log).toContainText('file.done.event', { timeout: 120_000 })
+  const text = (await log.textContent()) || ''
+
+  const doneMatches = text.match(/file\.done\.event/g) || []
+  expect(doneMatches.length).toBe(1)
+})
