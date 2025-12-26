@@ -4,7 +4,7 @@
 import {
   Input, ALL_FORMATS, BlobSource, AudioBufferSink,
   Output, Mp4OutputFormat, BufferTarget,
-  AudioSampleSource, AudioSample, EncodedVideoPacketSource, EncodedPacket
+  AudioSampleSource, AudioSample, EncodedVideoPacketSource, EncodedPacket, EncodedPacketSink, VideoSampleSink
 } from 'mediabunny'
 
 // ----- Constants -----
@@ -30,6 +30,36 @@ async function probeVideo (file) {
     }
     v.onerror = () => { URL.revokeObjectURL(url); reject(v.error || new Error('failed to load metadata')) }
   })
+}
+
+async function estimateSourceVideoFps (file) {
+  try {
+    const input = new Input({ source: new BlobSource(file), formats: ALL_FORMATS })
+    const tracks = await input.getTracks()
+    const video = tracks.find(t => typeof t.isVideoTrack === 'function' && t.isVideoTrack())
+    if (!video) return 0
+    const sink = new EncodedPacketSink(video)
+    const durations = []
+    for await (const packet of sink.packets(undefined, undefined, { metadataOnly: true })) {
+      const dur = Number(packet?.duration)
+      if (packet.timestamp >= 0 && Number.isFinite(dur) && dur > 0) durations.push(dur)
+      if (durations.length >= 120) break
+    }
+    if (!durations.length) return 0
+    durations.sort((a, b) => a - b)
+    const dur = durations[Math.floor(durations.length / 2)]
+    return Number.isFinite(dur) && dur > 0 ? (1 / dur) : 0
+  } catch (_) {
+    return 0
+  }
+}
+
+async function determineTargetFps (file, { width, height }) {
+  const maxFps = Math.max(width, height) <= 1920 ? 30 : 60
+  if (maxFps === 30) return 30
+
+  const fps = await estimateSourceVideoFps(file)
+  return fps >= 45 ? 60 : 30
 }
 
 // ----- Audio helpers -----
@@ -93,7 +123,7 @@ async function canOptimizeVideo (file) {
     const scale = Math.min(1, MAX_LONG_SIDE / Math.max(2, long))
     const targetWidth = Math.max(2, Math.round(width * scale))
     const targetHeight = Math.max(2, Math.round(height * scale))
-    const fps = Math.max(width, height) <= 1920 ? 30 : 60
+    const fps = await determineTargetFps(file, { width, height })
     const sup = await selectVideoEncoderConfig({ width: targetWidth, height: targetHeight, fps }).then(() => true).catch(() => false)
     if (!sup) return { ok: false, reason: 'unsupported-video-config', message: 'No supported encoder configuration for this resolution on this device.' }
 
@@ -110,7 +140,7 @@ async function canOptimizeVideo (file) {
       const hasEbml = buf.length >= 4 && buf[0] === 0x1A && buf[1] === 0x45 && buf[2] === 0xDF && buf[3] === 0xA3
       if (!(hasFtyp || hasEbml)) return { ok: false, reason: 'unknown-container', message: 'Unrecognized container; expected MP4/MOV or WebM.' }
     }
-    return { ok: true, reason: 'ok', message: 'ok' }
+    return { ok: true, reason: 'ok', message: 'ok', plan: { width: targetWidth, height: targetHeight, fps } }
   } catch (e) {
     return { ok: false, reason: 'probe-failed', message: String(e?.message || e) }
   }
@@ -125,7 +155,7 @@ async function optimizeVideo (file, { onProgress } = {}) {
   if (!feas.ok) return { changed: false, file }
 
   const srcMeta = await probeVideo(file)
-  const newFile = await encodeVideo({ file, srcMeta: { w: srcMeta.width, h: srcMeta.height, duration: srcMeta.duration }, onProgress })
+  const newFile = await encodeVideo({ file, srcMeta: { w: srcMeta.width, h: srcMeta.height, duration: srcMeta.duration }, plan: feas.plan, onProgress })
   return { changed: true, file: newFile }
 }
 
@@ -139,39 +169,16 @@ async function selectVideoEncoderConfig ({ width, height, fps }) {
   return { codecId: 'avc', config: supA.config }
 }
 
-async function waitForFrameReady (video, budgetMs) {
-  if (typeof video.requestVideoFrameCallback !== 'function') return false
-  return await new Promise((resolve) => {
-    let settled = false
-    const to = setTimeout(() => { if (!settled) { settled = true; resolve(false) } }, Math.max(1, budgetMs || 17))
-    video.requestVideoFrameCallback(() => { if (!settled) { settled = true; clearTimeout(to); resolve(true) } })
-  })
-}
-
-async function seekOnce (video, time) {
-  if (!video) return
-  const t = Number.isFinite(time) ? time : 0
-  if (Math.abs(video.currentTime - t) < 1e-6) return
-  await new Promise((resolve) => {
-    const onSeeked = () => {
-      video.removeEventListener('seeked', onSeeked)
-      resolve()
-    }
-    video.addEventListener('seeked', onSeeked, { once: true })
-    video.currentTime = t
-  })
-}
-
-async function encodeVideo ({ file, srcMeta, onProgress }) {
+async function encodeVideo ({ file, srcMeta, plan, onProgress }) {
   const w = srcMeta.w
   const h = srcMeta.h
   const durationCfr = Number(srcMeta.duration)
   const long = Math.max(w, h)
   const scale = Math.min(1, MAX_LONG_SIDE / Math.max(2, long))
-  const targetWidth = Math.max(2, Math.round(w * scale))
-  const targetHeight = Math.max(2, Math.round(h * scale))
+  const targetWidth = Math.max(2, Number(plan?.width) || Math.round(w * scale))
+  const targetHeight = Math.max(2, Number(plan?.height) || Math.round(h * scale))
 
-  const targetFps = Math.max(w, h) <= 1920 ? 30 : 60
+  const targetFps = Math.max(1, Number(plan?.fps) || await determineTargetFps(file, { width: w, height: h }))
   const step = 1 / Math.max(1, targetFps)
   const frames = Math.max(1, Math.floor(durationCfr / step))
 
@@ -215,62 +222,72 @@ async function encodeVideo ({ file, srcMeta, onProgress }) {
   })
   ve.configure(usedCfg)
 
-  const url = URL.createObjectURL(file)
-  const v = document.createElement('video')
-  v.muted = true; v.preload = 'auto'; v.playsInline = true
-  await new Promise((resolve, reject) => {
-    const onLoaded = () => {
-      v.removeEventListener('loadedmetadata', onLoaded)
-      v.removeEventListener('error', onError)
-      resolve()
-    }
-    const onError = () => {
-      v.removeEventListener('loadedmetadata', onLoaded)
-      v.removeEventListener('error', onError)
-      reject(new Error('video load failed'))
-    }
-    v.addEventListener('loadedmetadata', onLoaded)
-    v.addEventListener('error', onError)
-    v.src = url
-    try {
-      v.load()
-    } catch (err) {
-      console.warn('straight-to-video: video.load() threw; continuing without explicit load()', err)
-    }
-  })
   const canvas = document.createElement('canvas'); canvas.width = targetWidth; canvas.height = targetHeight
   const ctx = canvas.getContext('2d', { alpha: false })
 
-  for (let i = 0; i < frames; i++) {
-    const t = i * step
-    const targetTime = Math.min(Math.max(0, t), Math.max(0.000001, durationCfr - 0.000001))
-    const drawTime = i === 0
-      ? Math.min(Math.max(0, t + (step * 0.5)), Math.max(0.000001, durationCfr - 0.000001))
-      : targetTime
-    await seekOnce(v, drawTime)
-    const budgetMs = Math.min(34, Math.max(17, Math.round(step * 1000)))
-    const presented = await waitForFrameReady(v, budgetMs)
-    if (!presented && i === 0) {
-      const nudge = Math.min(step * 0.25, 0.004)
-      const target = Math.min(drawTime + nudge, Math.max(0.000001, durationCfr - 0.000001))
-      await seekOnce(v, target)
-    }
+  const input = new Input({ source: new BlobSource(file), formats: ALL_FORMATS })
+  const tracks = await input.getTracks()
+  const video = tracks.find(t => typeof t.isVideoTrack === 'function' && t.isVideoTrack())
+  if (!video || !(await video.canDecode())) throw new Error('video track is not decodable by this browser')
+  const sink = new VideoSampleSink(video)
+  const draw = (sample) => {
+    if (ctx.resetTransform) ctx.resetTransform()
+    else ctx.setTransform(1, 0, 0, 1, 0, 0)
+    ctx.fillStyle = 'black'
+    ctx.fillRect(0, 0, canvas.width, canvas.height)
+    sample.drawWithFit(ctx, { fit: 'fill' })
+  }
 
-    ctx.drawImage(v, 0, 0, canvas.width, canvas.height)
-    const vf = new VideoFrame(canvas, { timestamp: Math.round(t * 1e6), duration: Math.round(step * 1e6) })
-    ve.encode(vf, { keyFrame: i === 0 })
-    vf.close()
+  let i = 0
+  let prev = null
+  let prevStart = 0
 
-    if (typeof onProgress === 'function') {
-      try {
-        onProgress(Math.min(1, (i + 1) / frames))
-      } catch (err) {
-        console.warn('straight-to-video: onProgress callback threw; ignoring error', err)
+  for await (const sample of sink.samples(0, durationCfr + step)) {
+    const ts = Math.max(0, Number(sample.timestamp))
+    if (!prev) { prev = sample; prevStart = ts; continue }
+
+    const end = Math.max(prevStart, ts)
+    const displayTime = (i + 0.5) * step
+    if (displayTime < end) {
+      draw(prev)
+      while (i < frames) {
+        const displayTime = (i + 0.5) * step
+        if (displayTime < prevStart || displayTime >= end) break
+        const t = i * step
+        const vf = new VideoFrame(canvas, { timestamp: Math.round(t * 1e6), duration: Math.round(step * 1e6) })
+        ve.encode(vf, { keyFrame: i === 0 })
+        vf.close()
+
+        if (typeof onProgress === 'function') {
+          try {
+            onProgress(Math.min(1, (i + 1) / frames))
+          } catch (err) {
+            console.warn('straight-to-video: onProgress callback threw; ignoring error', err)
+          }
+        }
+
+        i++
       }
     }
+
+    if (typeof prev.close === 'function') prev.close()
+    prev = sample
+    prevStart = ts
+    if (i >= frames) break
+  }
+
+  if (prev) {
+    draw(prev)
+    while (i < frames) {
+      const t = i * step
+      const vf = new VideoFrame(canvas, { timestamp: Math.round(t * 1e6), duration: Math.round(step * 1e6) })
+      ve.encode(vf, { keyFrame: i === 0 })
+      vf.close()
+      i++
+    }
+    if (typeof prev.close === 'function') prev.close()
   }
   await ve.flush()
-  URL.revokeObjectURL(url)
 
   const muxCount = Math.min(frames, pendingPackets.length)
 

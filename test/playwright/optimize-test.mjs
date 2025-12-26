@@ -310,3 +310,37 @@ test('4K portrait MOV optimizes to spec and quality holds (4k_9_16.mov)', async 
   assertInstagramStrict(s, outPath)
   assertFrameColorPreserved(inPath, outPath, { at: 0.10, satRatio: 0.85, yDelta: 0.10 })
 })
+
+test('4K 30fps input does not upsample to 60fps (prevents cadence jank)', async ({ page }) => {
+  const source = 'test/fixtures/4k_16_9.mp4'
+  const clip = `test/tmp/${Date.now()}-4k_16_9-30fps.mp4`
+  execFileSync('ffmpeg', ['-v', 'error', '-y', '-i', source, '-vf', 'fps=30', '-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-an', '-movflags', '+faststart', clip])
+
+  await page.goto('/test/pages/optimize.html')
+  const json = await submitViaForm(page, clip)
+
+  const s = json.summary
+  expect(Number(s.width)).toBe(1920)
+  expect(Number(s.height)).toBe(1080)
+
+  const inFps = videoAvgFps(clip)
+  expect(inFps).toBeGreaterThanOrEqual(25)
+  expect(inFps).toBeLessThanOrEqual(35)
+  expect(Number(s.fps)).toBeGreaterThanOrEqual(25)
+  expect(Number(s.fps)).toBeLessThanOrEqual(inFps + 1)
+
+  fs.rmSync(clip, { force: true })
+})
+
+test('MP4 keeps motion cadence (2k_9_16.mp4)', async ({ page }) => {
+  const input = 'test/fixtures/2k_9_16.mp4'
+
+  await page.goto('/test/pages/optimize.html')
+  const json = await submitViaForm(page, input)
+  const outPath = json.file.path
+
+  const effIn = effectiveFpsViaMpdecimate(input)
+  const effOut = effectiveFpsViaMpdecimate(outPath)
+  expect(effIn).toBeGreaterThanOrEqual(24)
+  expect(effOut).toBeGreaterThanOrEqual(effIn * 0.85)
+})

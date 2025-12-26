@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+- fix periodic frame jutter by selecting source frames using mid-frame timestamps instead of boundary timestamps
+- improve cadence on some iPhone MOVs by decoding frames via WebCodecs (Mediabunny `VideoSampleSink`) instead of per-frame `<video>` seeks
+- avoid accidental 30→60fps upsampling by choosing 60fps only for high-FPS sources
+
 ## 0.0.7
 
 - guard against a race condition for forms that subscribe to change events but don't disable submission while optimize is already underway
