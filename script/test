@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 
-set -uo pipefail
+set -euo pipefail
 
 # Always execute from repo root so relative paths in config work
 cd "$(dirname "$0")/.."

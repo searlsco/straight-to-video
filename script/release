@@ -21,49 +21,103 @@ case "$BUMP_TYPE" in
   *) echo "Invalid bump type: $BUMP_TYPE (must be patch|minor|major)" >&2; exit 2 ;;
 esac
 
-# Ensure working copy is clean (no staged/unstaged changes), except for CHANGELOG.md
-if [ -n "$(git status --porcelain | grep -v '^ M CHANGELOG.md$')" ]; then
-  echo "Working tree is not clean. Commit or stash changes before releasing." >&2
-  echo "(CHANGELOG.md modifications are allowed)"
-  git status --short
-  exit 1
-fi
+package_name() {
+  node -p "require('./package.json').name"
+}
+
+package_version() {
+  node -p "require('./package.json').version"
+}
+
+head_package_version() {
+  git show HEAD:package.json | node -p "JSON.parse(require('fs').readFileSync(0, 'utf8')).version"
+}
+
+assert_working_tree_is_release_safe() {
+  local status
+  status="$(git status --porcelain)"
+
+  [ -z "$status" ] && return 0
+
+  local disallowed
+  disallowed="$(echo "$status" | sed -E 's/^.. //g' | while read -r path; do
+    case "$path" in
+      CHANGELOG.md|Gemfile.lock|package.json|package-lock.json|lib/straight_to_video/version.rb) ;;
+      app/assets/javascripts/*|pkg/*) ;;
+      *) echo "$path" ;;
+    esac
+  done)"
+
+  if [ -n "$disallowed" ]; then
+    echo "Working tree has non-release changes. Commit or stash before releasing." >&2
+    git status --short
+    exit 1
+  fi
+}
+
+ensure_npm_auth() {
+  npm whoami >/dev/null 2>&1 || {
+    echo "Not authenticated with npm. Run: npm login" >&2
+    exit 1
+  }
+}
+
+npm_has_version() {
+  local package_name version
+  package_name="$(package_name)"
+  version="$(package_version)"
+
+  npm view "${package_name}@${version}" version >/dev/null 2>&1
+}
+
+head_is_version_commit() {
+  [ "$(git log -1 --pretty=%s)" = "$(package_version)" ]
+}
+
+assert_working_tree_is_release_safe
 
 ## Bump version in package.json only (no git tag)
-echo "Bumping version: npm version --no-git-tag-version $BUMP_TYPE"
-npm version "$BUMP_TYPE" --no-git-tag-version
-
-# Sync Ruby gem version file to the new package version
-# Read version from package.json using Node for portability
-VERSION=$(node -p "require('./package.json').version")
-if [ -z "${VERSION:-}" ]; then
-  echo "Unable to determine version from package.json" >&2
-  exit 1
+if ! (head_is_version_commit && npm_has_version); then
+  ensure_npm_auth
 fi
 
-RB_VERSION_FILE="lib/straight_to_video/version.rb"
-if [ ! -f "$RB_VERSION_FILE" ]; then
-  echo "Missing $RB_VERSION_FILE" >&2
-  exit 1
+if ! head_is_version_commit; then
+  if [ "$(package_version)" = "$(head_package_version)" ]; then
+    echo "Bumping version: npm version --no-git-tag-version $BUMP_TYPE"
+    npm version "$BUMP_TYPE" --no-git-tag-version
+  fi
+
+  VERSION="$(package_version)"
+
+  RB_VERSION_FILE="lib/straight_to_video/version.rb"
+  if [ ! -f "$RB_VERSION_FILE" ]; then
+    echo "Missing $RB_VERSION_FILE" >&2
+    exit 1
+  fi
+
+  tmp_file="$RB_VERSION_FILE.tmp"
+  printf 'module StraightToVideo\n  VERSION = "%s"\nend\n' "$VERSION" > "$tmp_file"
+  mv "$tmp_file" "$RB_VERSION_FILE"
+
+  # Vendor javascript files (reflect new version in headers)
+  ./script/vendor
+
+  # Bump the version in the Gemfile.lock
+  bundle
+
+  # Commit version bumps as a single commit; bundler's rake release will tag
+  git add CHANGELOG.md package.json package-lock.json Gemfile.lock "$RB_VERSION_FILE" app/assets/javascripts
+  git commit -m "$VERSION"
 fi
-
-tmp_file="$RB_VERSION_FILE.tmp"
-printf 'module StraightToVideo\n  VERSION = "%s"\nend\n' "$VERSION" > "$tmp_file"
-mv "$tmp_file" "$RB_VERSION_FILE"
-
-# Vendor javascript files (reflect new version in headers)
-./script/vendor
-
-# Bump the version in the Gemfile.lock
-bundle
-
-# Commit version bumps as a single commit; bundler's rake release will tag
-git add CHANGELOG.md package.json package-lock.json Gemfile.lock "$RB_VERSION_FILE" app/assets/javascripts
-git commit -m "$VERSION"
 
 # Publish to npm
-echo "Publishing to npm (2FA may prompt)..."
-npm publish
+VERSION="$(package_version)"
+if npm_has_version; then
+  echo "Skipping npm publish (already published): $(package_name)@${VERSION}"
+else
+  echo "Publishing to npm (2FA may prompt)..."
+  npm publish
+fi
 
 # Trigger JSPM build
 echo "Triggering JSPM build for straight-to-video@${VERSION}..."
