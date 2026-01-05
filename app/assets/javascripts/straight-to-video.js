@@ -170,62 +170,88 @@ async function selectVideoEncoderConfig ({ width, height, fps }) {
   return { codecId: 'avc', config: supA.config }
 }
 
-async function encodeVideo ({ file, srcMeta, plan, onProgress }) {
-  const w = srcMeta.w
-  const h = srcMeta.h
-  const durationCfr = Number(srcMeta.duration)
-  const long = Math.max(w, h)
-  const scale = Math.min(1, MAX_LONG_SIDE / Math.max(2, long))
-  const targetWidth = Math.max(2, Number(plan?.width) || Math.round(w * scale))
-  const targetHeight = Math.max(2, Number(plan?.height) || Math.round(h * scale))
+function shouldDecodeViaVideoElement () {
+  return (navigator?.vendor || '').includes('Apple')
+}
 
-  const targetFps = Math.max(1, Number(plan?.fps) || await determineTargetFps(file, { width: w, height: h }))
-  const step = 1 / Math.max(1, targetFps)
-  const frames = Math.max(1, Math.floor(durationCfr / step))
+async function waitForFrameReady (video, budgetMs) {
+  if (typeof video.requestVideoFrameCallback !== 'function') return false
+  return await new Promise((resolve) => {
+    let settled = false
+    const to = setTimeout(() => { if (!settled) { settled = true; resolve(false) } }, Math.max(1, budgetMs || 17))
+    video.requestVideoFrameCallback(() => { if (!settled) { settled = true; clearTimeout(to); resolve(true) } })
+  })
+}
 
-  const output = new Output({ format: new Mp4OutputFormat({ fastStart: 'in-memory' }), target: new BufferTarget() })
-  const { codecId, config: usedCfg } = await selectVideoEncoderConfig({ width: targetWidth, height: targetHeight, fps: targetFps })
-  const videoTrack = new EncodedVideoPacketSource(codecId)
-  output.addVideoTrack(videoTrack, { frameRate: targetFps })
+async function seekOnce (video, time) {
+  if (!video) return
+  const t = Number.isFinite(time) ? time : 0
+  if (Math.abs(video.currentTime - t) < 1e-6) return
+  await new Promise((resolve) => {
+    const onSeeked = () => {
+      video.removeEventListener('seeked', onSeeked)
+      resolve()
+    }
+    video.addEventListener('seeked', onSeeked, { once: true })
+    video.currentTime = t
+  })
+}
 
-  const _warn = console.warn
-  console.warn = (...args) => {
-    const m = args && args[0]
-    if (typeof m === 'string' && m.includes('Unsupported audio codec') && m.includes('apac')) return
-    _warn.apply(console, args)
-  }
-  const audioBuffer = await decodeAudioPCM(file, { duration: durationCfr })
-  console.warn = _warn
-
-  const audioSource = new AudioSampleSource({
-    codec: 'aac',
-    bitrate: TARGET_AUDIO_BITRATE,
-    bitrateMode: 'constant',
-    numberOfChannels: TARGET_AUDIO_CHANNELS,
-    sampleRate: TARGET_AUDIO_SR,
-    onEncodedPacket: (_packet, meta) => {
-      const aot = 2; const idx = 3; const b0 = (aot << 3) | (idx >> 1); const b1 = ((idx & 1) << 7) | (TARGET_AUDIO_CHANNELS << 3)
-      meta.decoderConfig = { codec: 'mp4a.40.2', numberOfChannels: TARGET_AUDIO_CHANNELS, sampleRate: TARGET_AUDIO_SR, description: new Uint8Array([b0, b1]) }
+async function encodeFramesViaVideoElement ({ file, durationCfr, step, frames, canvas, ctx, ve, onProgress }) {
+  const url = URL.createObjectURL(file)
+  const v = document.createElement('video')
+  v.muted = true; v.preload = 'auto'; v.playsInline = true
+  await new Promise((resolve, reject) => {
+    const onLoaded = () => {
+      v.removeEventListener('loadedmetadata', onLoaded)
+      v.removeEventListener('error', onError)
+      resolve()
+    }
+    const onError = () => {
+      v.removeEventListener('loadedmetadata', onLoaded)
+      v.removeEventListener('error', onError)
+      reject(new Error('video load failed'))
+    }
+    v.addEventListener('loadedmetadata', onLoaded)
+    v.addEventListener('error', onError)
+    v.src = url
+    try {
+      v.load()
+    } catch (err) {
+      console.warn('straight-to-video: video.load() threw; continuing without explicit load()', err)
     }
   })
-  output.addAudioTrack(audioSource)
 
-  await output.start()
+  for (let i = 0; i < frames; i++) {
+    const t = i * step
+    const drawTime = Math.min(Math.max(0, t + (step * 0.5)), Math.max(0.000001, durationCfr - 0.000001))
+    await seekOnce(v, drawTime)
+    const budgetMs = Math.min(34, Math.max(17, Math.round(step * 1000)))
+    const presented = await waitForFrameReady(v, budgetMs)
+    if (!presented && i === 0) {
+      const nudge = Math.min(step * 0.25, 0.004)
+      const target = Math.min(drawTime + nudge, Math.max(0.000001, durationCfr - 0.000001))
+      await seekOnce(v, target)
+    }
 
-  let codecDesc = null
-  const pendingPackets = []
-  const ve = new VideoEncoder({
-    output: (chunk, meta) => {
-      if (!codecDesc && meta?.decoderConfig?.description) codecDesc = meta.decoderConfig.description
-      pendingPackets.push({ chunk })
-    },
-    error: () => {}
-  })
-  ve.configure(usedCfg)
+    ctx.drawImage(v, 0, 0, canvas.width, canvas.height)
+    const vf = new VideoFrame(canvas, { timestamp: Math.round(t * 1e6), duration: Math.round(step * 1e6) })
+    ve.encode(vf, { keyFrame: i === 0 })
+    vf.close()
 
-  const canvas = document.createElement('canvas'); canvas.width = targetWidth; canvas.height = targetHeight
-  const ctx = canvas.getContext('2d', { alpha: false })
+    if (typeof onProgress === 'function') {
+      try {
+        onProgress(Math.min(1, (i + 1) / frames))
+      } catch (err) {
+        console.warn('straight-to-video: onProgress callback threw; ignoring error', err)
+      }
+    }
+  }
 
+  URL.revokeObjectURL(url)
+}
+
+async function encodeFramesViaVideoSampleSink ({ file, durationCfr, step, frames, canvas, ctx, ve, onProgress }) {
   const input = new Input({ source: new BlobSource(file), formats: ALL_FORMATS })
   const tracks = await input.getTracks()
   const video = tracks.find(t => typeof t.isVideoTrack === 'function' && t.isVideoTrack())
@@ -284,10 +310,80 @@ async function encodeVideo ({ file, srcMeta, plan, onProgress }) {
       const vf = new VideoFrame(canvas, { timestamp: Math.round(t * 1e6), duration: Math.round(step * 1e6) })
       ve.encode(vf, { keyFrame: i === 0 })
       vf.close()
+
+      if (typeof onProgress === 'function') {
+        try {
+          onProgress(Math.min(1, (i + 1) / frames))
+        } catch (err) {
+          console.warn('straight-to-video: onProgress callback threw; ignoring error', err)
+        }
+      }
+
       i++
     }
     if (typeof prev.close === 'function') prev.close()
   }
+}
+
+async function encodeVideo ({ file, srcMeta, plan, onProgress }) {
+  const w = srcMeta.w
+  const h = srcMeta.h
+  const durationCfr = Number(srcMeta.duration)
+  const long = Math.max(w, h)
+  const scale = Math.min(1, MAX_LONG_SIDE / Math.max(2, long))
+  const targetWidth = Math.max(2, Number(plan?.width) || Math.round(w * scale))
+  const targetHeight = Math.max(2, Number(plan?.height) || Math.round(h * scale))
+
+  const targetFps = Math.max(1, Number(plan?.fps) || await determineTargetFps(file, { width: w, height: h }))
+  const step = 1 / Math.max(1, targetFps)
+  const frames = Math.max(1, Math.floor(durationCfr / step))
+
+  const output = new Output({ format: new Mp4OutputFormat({ fastStart: 'in-memory' }), target: new BufferTarget() })
+  const { codecId, config: usedCfg } = await selectVideoEncoderConfig({ width: targetWidth, height: targetHeight, fps: targetFps })
+  const videoTrack = new EncodedVideoPacketSource(codecId)
+  output.addVideoTrack(videoTrack, { frameRate: targetFps })
+
+  const _warn = console.warn
+  console.warn = (...args) => {
+    const m = args && args[0]
+    if (typeof m === 'string' && m.includes('Unsupported audio codec') && m.includes('apac')) return
+    _warn.apply(console, args)
+  }
+  const audioBuffer = await decodeAudioPCM(file, { duration: durationCfr })
+  console.warn = _warn
+
+  const audioSource = new AudioSampleSource({
+    codec: 'aac',
+    bitrate: TARGET_AUDIO_BITRATE,
+    bitrateMode: 'constant',
+    numberOfChannels: TARGET_AUDIO_CHANNELS,
+    sampleRate: TARGET_AUDIO_SR,
+    onEncodedPacket: (_packet, meta) => {
+      const aot = 2; const idx = 3; const b0 = (aot << 3) | (idx >> 1); const b1 = ((idx & 1) << 7) | (TARGET_AUDIO_CHANNELS << 3)
+      meta.decoderConfig = { codec: 'mp4a.40.2', numberOfChannels: TARGET_AUDIO_CHANNELS, sampleRate: TARGET_AUDIO_SR, description: new Uint8Array([b0, b1]) }
+    }
+  })
+  output.addAudioTrack(audioSource)
+
+  await output.start()
+
+  let codecDesc = null
+  const pendingPackets = []
+  const ve = new VideoEncoder({
+    output: (chunk, meta) => {
+      if (!codecDesc && meta?.decoderConfig?.description) codecDesc = meta.decoderConfig.description
+      pendingPackets.push({ chunk })
+    },
+    error: () => {}
+  })
+  ve.configure(usedCfg)
+
+  const canvas = document.createElement('canvas'); canvas.width = targetWidth; canvas.height = targetHeight
+  const ctx = canvas.getContext('2d', { alpha: false })
+
+  await (shouldDecodeViaVideoElement()
+    ? encodeFramesViaVideoElement({ file, durationCfr, step, frames, canvas, ctx, ve, onProgress })
+    : encodeFramesViaVideoSampleSink({ file, durationCfr, step, frames, canvas, ctx, ve, onProgress }))
   await ve.flush()
 
   const muxCount = Math.min(frames, pendingPackets.length)

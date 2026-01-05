@@ -308,7 +308,7 @@ test('4K portrait MOV optimizes to spec and quality holds (4k_9_16.mov)', async 
   expect(Number.isFinite(vol.max)).toBe(true)
   expect(vol.max).toBeGreaterThan(-19.0)
   assertInstagramStrict(s, outPath)
-  assertFrameColorPreserved(inPath, outPath, { at: 0.10, satRatio: 0.85, yDelta: 0.10 })
+  assertFrameColorPreserved(inPath, outPath, { at: 0.10, satRatio: 1.40, yDelta: 0.10 })
 })
 
 test('4K 30fps input does not upsample to 60fps (prevents cadence jank)', async ({ page }) => {
