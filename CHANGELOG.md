@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.0.9
+
+- Fixes washed out HDR videos on WebKit and enforced with stricter saturation assertion
+
 ## 0.0.8
 
 - fix periodic frame jutter by selecting source frames using mid-frame timestamps instead of boundary timestamps
