@@ -15,8 +15,7 @@
     }
   },
   "dependencies": {
-    "mediabunny": "^1.39.2",
-    "mp4box": "^2.3.0"
+    "mediabunny": "^1.39.2"
   },
   "keywords": [
     "webcodecs",

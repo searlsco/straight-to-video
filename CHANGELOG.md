@@ -2,7 +2,7 @@
 
 ## 0.0.10
 
-- Remux mp4 output through mp4box.js to produce spec-compliant ISOBMFF containers, fixing a Safari macOS Tahoe bug where video controls never auto-hide
+- Fix Safari macOS Tahoe bug where native video controls never auto-hide by rewriting the moov atom to match ffmpeg's conventions (zero timestamps, standard handler names, edts/elst, extended esds, btrt, sgpd/sbgp)
 
 ## 0.0.9
 

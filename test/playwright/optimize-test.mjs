@@ -332,14 +332,34 @@ test('4K 30fps input does not upsample to 60fps (prevents cadence jank)', async 
   fs.rmSync(clip, { force: true })
 })
 
-test('output container has standard handler names (not mediabunny)', async ({ page }) => {
+test('output moov matches ffmpeg conventions (Safari Tahoe controls fix)', async ({ page }) => {
   const input = 'test/fixtures/safari-controls-bug.mp4'
   await page.goto('/test/pages/optimize.html')
   const json = await submitViaForm(page, input)
+  const outPath = json.file.path
   const videoStream = json.probe.streams.find(s => s.codec_type === 'video')
   const audioStream = json.probe.streams.find(s => s.codec_type === 'audio')
-  expect(videoStream.tags.handler_name).not.toMatch(/mediabunny/i)
-  expect(audioStream.tags.handler_name).not.toMatch(/mediabunny/i)
+
+  // Standard handler names (no mediabunny prefix)
+  expect(videoStream.tags.handler_name).toBe('VideoHandler')
+  expect(audioStream.tags.handler_name).toBe('SoundHandler')
+
+  // Creation times should be zeroed (epoch or absent, not a recent date)
+  const vTime = videoStream.tags?.creation_time || ''
+  const aTime = audioStream.tags?.creation_time || ''
+  expect(vTime).not.toMatch(/202[0-9]/)
+  expect(aTime).not.toMatch(/202[0-9]/)
+
+  // No mhlr pre_defined field in hdlr boxes (moov is near front, check first 32KB)
+  const data = fs.readFileSync(outPath)
+  const moovRegion = data.subarray(0, Math.min(data.length, 32768))
+  expect(moovRegion.includes(Buffer.from('mhlr'))).toBe(false)
+
+  // Non-fragmented: no moof boxes anywhere in the file
+  expect(data.includes(Buffer.from('moof'))).toBe(false)
+
+  // Output should be valid and playable
+  assertInstagramStrict(json.summary, outPath)
 })
 
 test('MP4 keeps motion cadence (2k_9_16.mp4)', async ({ page }) => {

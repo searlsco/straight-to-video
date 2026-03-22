@@ -6,7 +6,6 @@ import {
   Output, Mp4OutputFormat, BufferTarget,
   AudioSampleSource, AudioSample, EncodedVideoPacketSource, EncodedPacket, EncodedPacketSink, VideoSampleSink
 } from 'mediabunny'
-import { createFile as mp4boxCreateFile, DataStream } from 'mp4box'
 
 // ----- Constants -----
 const MAX_LONG_SIDE = 1920
@@ -325,95 +324,297 @@ async function encodeFramesViaVideoSampleSink ({ file, durationCfr, step, frames
   }
 }
 
-function findBox (entry, type) {
-  return (entry.boxes || []).find(b => b.type === type)
+// ----- MP4 moov rewriter -----
+// Rebuilds the moov atom to match ffmpeg's conventions, fixing the Safari
+// Tahoe controls auto-hide bug caused by mediabunny's non-standard moov.
+
+function _concat (...parts) {
+  let n = 0
+  for (const p of parts) n += p.byteLength
+  const out = new Uint8Array(n)
+  let o = 0
+  for (const p of parts) { out.set(p, o); o += p.byteLength }
+  return out
+}
+
+function _u32 (v) { const b = new Uint8Array(4); new DataView(b.buffer).setUint32(0, v); return b }
+function _u16 (v) { const b = new Uint8Array(2); new DataView(b.buffer).setUint16(0, v); return b }
+function _ascii (s) { const b = new Uint8Array(s.length); for (let i = 0; i < s.length; i++) b[i] = s.charCodeAt(i); return b }
+
+function _box (type, ...parts) {
+  let n = 8; for (const p of parts) n += p.byteLength
+  return _concat(_u32(n), _ascii(type), ...parts)
+}
+
+function _full (type, ver, flags, ...parts) {
+  return _box(type, new Uint8Array([ver, (flags >> 16) & 0xff, (flags >> 8) & 0xff, flags & 0xff]), ...parts)
+}
+
+function _matrix () {
+  const m = new Uint8Array(36); const d = new DataView(m.buffer)
+  d.setUint32(0, 0x00010000); d.setUint32(16, 0x00010000); d.setUint32(32, 0x40000000)
+  return m
+}
+
+function _scanBoxes (u8, start, end) {
+  const dv = new DataView(u8.buffer, u8.byteOffset, u8.byteLength)
+  const out = []; let pos = start
+  while (pos + 8 <= end) {
+    let sz = dv.getUint32(pos)
+    const t = String.fromCharCode(u8[pos + 4], u8[pos + 5], u8[pos + 6], u8[pos + 7])
+    if (sz === 1 && pos + 16 <= end) sz = dv.getUint32(pos + 8) * 0x100000000 + dv.getUint32(pos + 12)
+    if (sz === 0) sz = end - pos
+    if (sz < 8 || pos + sz > end) break
+    out.push({ type: t, offset: pos, size: sz })
+    pos += sz
+  }
+  return out
+}
+
+function _esdTag (tag, payload) {
+  return _concat(new Uint8Array([tag, 0x80, 0x80, 0x80, payload.byteLength]), payload)
+}
+
+function _findAudioSpecificConfig (esdsBody) {
+  for (let i = 0; i < esdsBody.length - 3; i++) {
+    if (esdsBody[i] === 0x05) {
+      let j = i + 1; while (j < esdsBody.length && esdsBody[j] === 0x80) j++
+      if (j < esdsBody.length) {
+        const len = esdsBody[j]; j++
+        if (len >= 2 && j + len <= esdsBody.length) return esdsBody.slice(j, j + len)
+      }
+    }
+  }
+  return new Uint8Array([0x11, 0x90])
+}
+
+function _extractTrack (u8, dv, trakBox) {
+  const kids = _scanBoxes(u8, trakBox.offset + 8, trakBox.offset + trakBox.size)
+  const tkhdBox = kids.find(b => b.type === 'tkhd')
+  const mdiaBox = kids.find(b => b.type === 'mdia')
+  if (!tkhdBox || !mdiaBox) return null
+
+  const to = tkhdBox.offset + 12
+  const trackId = dv.getUint32(to + 8)
+  const tkDur = dv.getUint32(to + 16)
+  const tkW = dv.getUint32(to + 72)
+  const tkH = dv.getUint32(to + 76)
+
+  const mdiaKids = _scanBoxes(u8, mdiaBox.offset + 8, mdiaBox.offset + mdiaBox.size)
+  const mdhdBox = mdiaKids.find(b => b.type === 'mdhd')
+  const hdlrBox = mdiaKids.find(b => b.type === 'hdlr')
+  const minfBox = mdiaKids.find(b => b.type === 'minf')
+  if (!mdhdBox || !hdlrBox || !minfBox) return null
+
+  const mo = mdhdBox.offset + 12
+  const mdTs = dv.getUint32(mo + 8)
+  const mdDur = dv.getUint32(mo + 12)
+  const mdLang = dv.getUint16(mo + 16)
+
+  const ho = hdlrBox.offset + 12
+  const ht = String.fromCharCode(u8[ho + 4], u8[ho + 5], u8[ho + 6], u8[ho + 7])
+  const isVideo = ht === 'vide'
+  const isAudio = ht === 'soun'
+
+  const minfKids = _scanBoxes(u8, minfBox.offset + 8, minfBox.offset + minfBox.size)
+  const stblBox = minfKids.find(b => b.type === 'stbl')
+  if (!stblBox) return null
+
+  const stblKids = _scanBoxes(u8, stblBox.offset + 8, stblBox.offset + stblBox.size)
+  const stsdBox = stblKids.find(b => b.type === 'stsd')
+  const sttsBox = stblKids.find(b => b.type === 'stts')
+  const stscBox = stblKids.find(b => b.type === 'stsc')
+  const stszBox = stblKids.find(b => b.type === 'stsz')
+  const stcoBox = stblKids.find(b => b.type === 'stco')
+  const stssBox = stblKids.find(b => b.type === 'stss')
+  if (!stsdBox || !sttsBox || !stscBox || !stszBox || !stcoBox) return null
+
+  const sampleCount = dv.getUint32(stszBox.offset + 16)
+  const stcoCount = dv.getUint32(stcoBox.offset + 12)
+  const stcoEntries = []
+  for (let i = 0; i < stcoCount; i++) stcoEntries.push(dv.getUint32(stcoBox.offset + 16 + i * 4))
+
+  const sttsBody = u8.slice(sttsBox.offset + 12, sttsBox.offset + sttsBox.size)
+  const stscBody = u8.slice(stscBox.offset + 12, stscBox.offset + stscBox.size)
+  const stszBody = u8.slice(stszBox.offset + 12, stszBox.offset + stszBox.size)
+  const stssBody = stssBox ? u8.slice(stssBox.offset + 12, stssBox.offset + stssBox.size) : null
+
+  const entryOff = stsdBox.offset + 16
+  const entrySize = dv.getUint32(entryOff)
+  const codecTag = String.fromCharCode(u8[entryOff + 4], u8[entryOff + 5], u8[entryOff + 6], u8[entryOff + 7])
+
+  let videoCodecConfig = null
+  let audioSpecificConfig = null
+  let audioChannels = 0, audioSampleSize = 0, audioSampleRate = 0
+
+  if (isVideo) {
+    const subs = _scanBoxes(u8, entryOff + 86, entryOff + entrySize)
+    const cfg = subs.find(b => b.type === 'hvcC' || b.type === 'avcC')
+    if (cfg) videoCodecConfig = u8.slice(cfg.offset, cfg.offset + cfg.size)
+  }
+
+  if (isAudio) {
+    audioChannels = dv.getUint16(entryOff + 24)
+    audioSampleSize = dv.getUint16(entryOff + 26)
+    audioSampleRate = dv.getUint16(entryOff + 32)
+    const subs = _scanBoxes(u8, entryOff + 36, entryOff + entrySize)
+    const esdsBox = subs.find(b => b.type === 'esds')
+    if (esdsBox) audioSpecificConfig = _findAudioSpecificConfig(u8.slice(esdsBox.offset + 12, esdsBox.offset + esdsBox.size))
+  }
+
+  let bitrate = 0
+  const defSz = dv.getUint32(stszBox.offset + 12)
+  let totalBytes = 0
+  if (defSz > 0) { totalBytes = defSz * sampleCount }
+  else { for (let i = 0; i < sampleCount; i++) totalBytes += dv.getUint32(stszBox.offset + 16 + i * 4) }
+  const durSec = mdTs > 0 ? mdDur / mdTs : 0
+  if (durSec > 0) bitrate = Math.round((totalBytes * 8) / durSec)
+
+  return {
+    isVideo, isAudio, trackId, codecTag,
+    tkDur, tkW, tkH, mdTs, mdDur, mdLang,
+    videoCodecConfig, audioSpecificConfig,
+    audioChannels, audioSampleSize, audioSampleRate,
+    sttsBody, stscBody, stszBody, stssBody,
+    stcoEntries, sampleCount, bitrate
+  }
+}
+
+function _buildStsd (t) {
+  if (t.isVideo && t.videoCodecConfig) {
+    const entry = _concat(
+      new Uint8Array(6), _u16(1),
+      new Uint8Array(16),
+      _u16(t.tkW >>> 16), _u16(t.tkH >>> 16),
+      _u32(0x00480000), _u32(0x00480000),
+      _u32(0), _u16(1),
+      new Uint8Array(32), _u16(0x0018), _u16(0xFFFF),
+      t.videoCodecConfig,
+      _box('btrt', _u32(0), _u32(t.bitrate), _u32(t.bitrate)))
+    return _full('stsd', 0, 0, _u32(1), _box(t.codecTag, entry))
+  }
+  if (t.isAudio && t.audioSpecificConfig) {
+    const decSpecInfo = _esdTag(0x05, t.audioSpecificConfig)
+    const decConfig = _esdTag(0x04, _concat(
+      new Uint8Array([0x40, 0x15, 0x00, 0x00, 0x00]),
+      _u32(t.bitrate), _u32(t.bitrate), decSpecInfo))
+    const slConfig = _esdTag(0x06, new Uint8Array([0x02]))
+    const esDesc = _esdTag(0x03, _concat(_u16(t.trackId), new Uint8Array([0x00]), decConfig, slConfig))
+    const esds = _full('esds', 0, 0, esDesc)
+    const btrt = _box('btrt', _u32(0), _u32(t.bitrate), _u32(t.bitrate))
+    const entry = _concat(
+      new Uint8Array(6), _u16(1),
+      new Uint8Array(8),
+      _u16(t.audioChannels), _u16(t.audioSampleSize),
+      _u16(0), _u16(0),
+      _u16(t.audioSampleRate), _u16(0),
+      esds, btrt)
+    return _full('stsd', 0, 0, _u32(1), _box(t.codecTag, entry))
+  }
+  return _full('stsd', 0, 0, _u32(0))
+}
+
+function _buildTrak (t) {
+  const tkhd = _full('tkhd', 0, 3,
+    _u32(0), _u32(0), _u32(t.trackId), _u32(0), _u32(t.tkDur),
+    new Uint8Array(8), _u16(0), _u16(0),
+    _u16(t.isAudio ? 0x0100 : 0), _u16(0),
+    _matrix(), _u32(t.isVideo ? t.tkW : 0), _u32(t.isVideo ? t.tkH : 0))
+  const elst = _full('elst', 0, 0, _u32(1), _u32(t.tkDur), _u32(0), _u16(1), _u16(0))
+  const edts = _box('edts', elst)
+  const mdhd = _full('mdhd', 0, 0,
+    _u32(0), _u32(0), _u32(t.mdTs), _u32(t.mdDur),
+    _u16(t.mdLang || 0x55c4), _u16(0))
+  const name = t.isVideo ? 'VideoHandler' : t.isAudio ? 'SoundHandler' : 'Handler'
+  const hdlr = _full('hdlr', 0, 0,
+    _u32(0), _ascii(t.isVideo ? 'vide' : 'soun'),
+    new Uint8Array(12), _ascii(name + '\0'))
+
+  const stsd = _buildStsd(t)
+  const stts = _full('stts', 0, 0, t.sttsBody)
+  const stsc = _full('stsc', 0, 0, t.stscBody)
+  const stsz = _full('stsz', 0, 0, t.stszBody)
+
+  const stcoPayload = new Uint8Array(4 + t.stcoEntries.length * 4)
+  const stcoDv = new DataView(stcoPayload.buffer)
+  stcoDv.setUint32(0, t.stcoEntries.length)
+  for (let i = 0; i < t.stcoEntries.length; i++) stcoDv.setUint32(4 + i * 4, t.stcoEntries[i])
+  const stco = _full('stco', 0, 0, stcoPayload)
+
+  const stss = t.stssBody ? _full('stss', 0, 0, t.stssBody) : null
+
+  const stblParts = [stsd, stts]
+  if (stss) stblParts.push(stss)
+  stblParts.push(stsc, stsz, stco)
+  if (t.isAudio) {
+    stblParts.push(
+      _full('sgpd', 1, 0, _ascii('roll'), _u32(2), _u32(1), _u16(0xFFFF)),
+      _full('sbgp', 0, 0, _ascii('roll'), _u32(1), _u32(t.sampleCount), _u32(1)))
+  }
+  const stbl = _box('stbl', ...stblParts)
+
+  const mediaHdr = t.isVideo
+    ? _full('vmhd', 0, 1, new Uint8Array(8))
+    : _full('smhd', 0, 0, new Uint8Array(4))
+  const dref = _full('dref', 0, 0, _u32(1), _full('url ', 0, 1))
+  const dinf = _box('dinf', dref)
+  const minf = _box('minf', mediaHdr, dinf, stbl)
+  const mdia = _box('mdia', mdhd, hdlr, minf)
+
+  return _box('trak', tkhd, edts, mdia)
 }
 
 async function normalizeMp4Container (buffer) {
-  return new Promise((resolve, reject) => {
-    const input = mp4boxCreateFile(true)
-    const output = mp4boxCreateFile()
-    const trackMap = new Map()
-    let tracksReady = 0
-    let totalTracks = 0
+  const u8 = buffer instanceof ArrayBuffer
+    ? new Uint8Array(buffer)
+    : new Uint8Array(buffer.buffer, buffer.byteOffset, buffer.byteLength)
+  const dv = new DataView(u8.buffer, u8.byteOffset, u8.byteLength)
 
-    input.onReady = (info) => {
-      totalTracks = info.tracks.length
-      if (totalTracks === 0) { resolve(buffer); return }
+  const top = _scanBoxes(u8, 0, u8.byteLength)
+  const moovBox = top.find(b => b.type === 'moov')
+  const mdatBox = top.find(b => b.type === 'mdat')
+  if (!moovBox || !mdatBox) return buffer
 
-      for (const track of info.tracks) {
-        const trak = input.getTrackById(track.id)
-        const sampleDesc = trak.mdia.minf.stbl.stsd.entries[0]
-        const isVideo = track.type === 'video'
-        const isAudio = track.type === 'audio'
+  const moovKids = _scanBoxes(u8, moovBox.offset + 8, moovBox.offset + moovBox.size)
+  const mvhdBox = moovKids.find(b => b.type === 'mvhd')
+  const trakBoxes = moovKids.filter(b => b.type === 'trak')
+  if (!mvhdBox || !trakBoxes.length) return buffer
 
-        const opts = {
-          timescale: track.timescale,
-          media_duration: trak.mdia.mdhd.duration,
-          duration: trak.tkhd.duration,
-          nb_samples: track.nb_samples,
-          hdlr: isVideo ? 'vide' : isAudio ? 'soun' : trak.mdia.hdlr.handler,
-          name: isVideo ? 'VideoHandler' : isAudio ? 'SoundHandler' : track.name,
-          type: sampleDesc.type
-        }
+  const mvo = mvhdBox.offset + 12
+  const mvTs = dv.getUint32(mvo + 8)
+  const mvDur = dv.getUint32(mvo + 12)
 
-        if (isVideo) {
-          opts.width = track.track_width
-          opts.height = track.track_height
-          const hvcC = findBox(sampleDesc, 'hvcC')
-          const avcC = findBox(sampleDesc, 'avcC')
-          if (hvcC) {
-            const stream = new DataStream(); stream.endianness = DataStream.BIG_ENDIAN
-            hvcC.write(stream)
-            opts.hevcDecoderConfigRecord = stream.buffer.slice(8)
-          } else if (avcC) {
-            const stream = new DataStream(); stream.endianness = DataStream.BIG_ENDIAN
-            avcC.write(stream)
-            opts.avcDecoderConfigRecord = stream.buffer.slice(8)
-          }
-        } else if (isAudio) {
-          opts.channel_count = track.audio?.channel_count || 2
-          opts.samplerate = track.audio?.sample_rate || 48000
-          opts.samplesize = sampleDesc.samplesize || 16
-          const esds = findBox(sampleDesc, 'esds')
-          if (esds) opts.description = esds
-        }
+  const tracks = []
+  for (const tb of trakBoxes) {
+    const t = _extractTrack(u8, dv, tb)
+    if (t) tracks.push(t)
+  }
+  if (!tracks.length) return buffer
 
-        const newId = output.addTrack(opts)
-        trackMap.set(track.id, newId)
+  const ftyp = _box('ftyp', _ascii('isom'), _u32(0x200), _ascii('isom'), _ascii('iso2'), _ascii('mp41'))
 
-        input.setExtractionOptions(track.id, null, { nbSamples: track.nb_samples })
+  const mvhd = _full('mvhd', 0, 0,
+    _u32(0), _u32(0), _u32(mvTs), _u32(mvDur),
+    _u32(0x00010000), _u16(0x0100), new Uint8Array(10),
+    _matrix(), new Uint8Array(24), _u32(tracks.length + 1))
+  const newTraks = tracks.map(t => _buildTrak(t))
+  const moov = _box('moov', mvhd, ...newTraks)
+
+  // Patch stco offsets: delta = new mdat position - original mdat position
+  const delta = ftyp.byteLength + moov.byteLength - mdatBox.offset
+  const mdv = new DataView(moov.buffer, moov.byteOffset, moov.byteLength)
+  for (let i = 0; i < moov.byteLength - 8; i++) {
+    if (moov[i + 4] === 0x73 && moov[i + 5] === 0x74 && moov[i + 6] === 0x63 && moov[i + 7] === 0x6f) {
+      const cnt = mdv.getUint32(i + 12)
+      for (let j = 0; j < cnt; j++) {
+        const p = i + 16 + j * 4
+        mdv.setUint32(p, mdv.getUint32(p) + delta)
       }
-
-      input.onSamples = (trackId, _user, samples) => {
-        const outId = trackMap.get(trackId)
-        for (const sample of samples) {
-          output.addSample(outId, sample.data, {
-            duration: sample.duration,
-            dts: sample.dts,
-            cts: sample.cts,
-            is_sync: sample.is_sync
-          })
-        }
-        tracksReady++
-        if (tracksReady >= totalTracks) {
-          try {
-            const ds = output.getBuffer()
-            resolve(ds.buffer)
-          } catch (e) { reject(e) }
-        }
-      }
-
-      input.start()
     }
+  }
 
-    input.onError = (e) => reject(new Error(String(e)))
-
-    const ab = buffer instanceof ArrayBuffer ? buffer : buffer.buffer.slice(buffer.byteOffset, buffer.byteOffset + buffer.byteLength)
-    ab.fileStart = 0
-    input.appendBuffer(ab)
-    input.flush()
-  })
+  const mdatBytes = u8.slice(mdatBox.offset, mdatBox.offset + mdatBox.size)
+  return _concat(ftyp, moov, mdatBytes).buffer
 }
 
 async function encodeVideo ({ file, srcMeta, plan, onProgress }) {
