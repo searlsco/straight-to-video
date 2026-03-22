@@ -6,6 +6,7 @@ import {
   Output, Mp4OutputFormat, BufferTarget,
   AudioSampleSource, AudioSample, EncodedVideoPacketSource, EncodedPacket, EncodedPacketSink, VideoSampleSink
 } from 'mediabunny'
+import { createFile as mp4boxCreateFile, DataStream } from 'mp4box'
 
 // ----- Constants -----
 const MAX_LONG_SIDE = 1920
@@ -324,6 +325,97 @@ async function encodeFramesViaVideoSampleSink ({ file, durationCfr, step, frames
   }
 }
 
+function findBox (entry, type) {
+  return (entry.boxes || []).find(b => b.type === type)
+}
+
+async function normalizeMp4Container (buffer) {
+  return new Promise((resolve, reject) => {
+    const input = mp4boxCreateFile(true)
+    const output = mp4boxCreateFile()
+    const trackMap = new Map()
+    let tracksReady = 0
+    let totalTracks = 0
+
+    input.onReady = (info) => {
+      totalTracks = info.tracks.length
+      if (totalTracks === 0) { resolve(buffer); return }
+
+      for (const track of info.tracks) {
+        const trak = input.getTrackById(track.id)
+        const sampleDesc = trak.mdia.minf.stbl.stsd.entries[0]
+        const isVideo = track.type === 'video'
+        const isAudio = track.type === 'audio'
+
+        const opts = {
+          timescale: track.timescale,
+          media_duration: trak.mdia.mdhd.duration,
+          duration: trak.tkhd.duration,
+          nb_samples: track.nb_samples,
+          hdlr: isVideo ? 'vide' : isAudio ? 'soun' : trak.mdia.hdlr.handler,
+          name: isVideo ? 'VideoHandler' : isAudio ? 'SoundHandler' : track.name,
+          type: sampleDesc.type
+        }
+
+        if (isVideo) {
+          opts.width = track.track_width
+          opts.height = track.track_height
+          const hvcC = findBox(sampleDesc, 'hvcC')
+          const avcC = findBox(sampleDesc, 'avcC')
+          if (hvcC) {
+            const stream = new DataStream(); stream.endianness = DataStream.BIG_ENDIAN
+            hvcC.write(stream)
+            opts.hevcDecoderConfigRecord = stream.buffer.slice(8)
+          } else if (avcC) {
+            const stream = new DataStream(); stream.endianness = DataStream.BIG_ENDIAN
+            avcC.write(stream)
+            opts.avcDecoderConfigRecord = stream.buffer.slice(8)
+          }
+        } else if (isAudio) {
+          opts.channel_count = track.audio?.channel_count || 2
+          opts.samplerate = track.audio?.sample_rate || 48000
+          opts.samplesize = sampleDesc.samplesize || 16
+          const esds = findBox(sampleDesc, 'esds')
+          if (esds) opts.description = esds
+        }
+
+        const newId = output.addTrack(opts)
+        trackMap.set(track.id, newId)
+
+        input.setExtractionOptions(track.id, null, { nbSamples: track.nb_samples })
+      }
+
+      input.onSamples = (trackId, _user, samples) => {
+        const outId = trackMap.get(trackId)
+        for (const sample of samples) {
+          output.addSample(outId, sample.data, {
+            duration: sample.duration,
+            dts: sample.dts,
+            cts: sample.cts,
+            is_sync: sample.is_sync
+          })
+        }
+        tracksReady++
+        if (tracksReady >= totalTracks) {
+          try {
+            const ds = output.getBuffer()
+            resolve(ds.buffer)
+          } catch (e) { reject(e) }
+        }
+      }
+
+      input.start()
+    }
+
+    input.onError = (e) => reject(new Error(String(e)))
+
+    const ab = buffer instanceof ArrayBuffer ? buffer : buffer.buffer.slice(buffer.byteOffset, buffer.byteOffset + buffer.byteLength)
+    ab.fileStart = 0
+    input.appendBuffer(ab)
+    input.flush()
+  })
+}
+
 async function encodeVideo ({ file, srcMeta, plan, onProgress }) {
   const w = srcMeta.w
   const h = srcMeta.h
@@ -404,8 +496,8 @@ async function encodeVideo ({ file, srcMeta, plan, onProgress }) {
   await audioSource.add(sample)
   audioSource.close()
   await output.finalize()
-  const { buffer } = output.target
-  const payload = new Uint8Array(buffer)
+  const normalized = await normalizeMp4Container(output.target.buffer)
+  const payload = new Uint8Array(normalized)
   const nm = file.name; const dot = nm.lastIndexOf('.')
   const newName = `${nm.substring(0, dot)}-optimized.mp4`
   return new File([payload], newName, { type: 'video/mp4', lastModified: Date.now() })

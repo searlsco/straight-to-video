@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.0.10
+
+- Remux mp4 output through mp4box.js to produce spec-compliant ISOBMFF containers, fixing a Safari macOS Tahoe bug where video controls never auto-hide
+
 ## 0.0.9
 
 - Fixes washed out HDR videos on WebKit and enforced with stricter saturation assertion

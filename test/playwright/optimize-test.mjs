@@ -332,6 +332,16 @@ test('4K 30fps input does not upsample to 60fps (prevents cadence jank)', async 
   fs.rmSync(clip, { force: true })
 })
 
+test('output container has standard handler names (not mediabunny)', async ({ page }) => {
+  const input = 'test/fixtures/safari-controls-bug.mp4'
+  await page.goto('/test/pages/optimize.html')
+  const json = await submitViaForm(page, input)
+  const videoStream = json.probe.streams.find(s => s.codec_type === 'video')
+  const audioStream = json.probe.streams.find(s => s.codec_type === 'audio')
+  expect(videoStream.tags.handler_name).not.toMatch(/mediabunny/i)
+  expect(audioStream.tags.handler_name).not.toMatch(/mediabunny/i)
+})
+
 test('MP4 keeps motion cadence (2k_9_16.mp4)', async ({ page }) => {
   const input = 'test/fixtures/2k_9_16.mp4'
 

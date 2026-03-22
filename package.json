@@ -15,7 +15,8 @@
     }
   },
   "dependencies": {
-    "mediabunny": "^1.27.3"
+    "mediabunny": "^1.39.2",
+    "mp4box": "^2.3.0"
   },
   "keywords": [
     "webcodecs",
@@ -41,6 +42,7 @@
     "test": "script/test"
   },
   "devDependencies": {
+    "@hotwired/stimulus": "^3.2.2",
     "@playwright/test": "^1.57.0",
     "busboy": "^1.6.0"
   }
