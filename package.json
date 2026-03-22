@@ -1,6 +1,6 @@
 {
   "name": "straight-to-video",
-  "version": "0.0.9",
+  "version": "0.0.10",
   "description": "Browser-based, hardware-accelerated video upload optimization",
   "type": "module",
   "exports": {
