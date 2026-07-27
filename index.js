@@ -9,6 +9,7 @@ import {
 
 // ----- Constants -----
 const MAX_LONG_SIDE = 1920
+const TARGET_VIDEO_BITRATE = 12_000_000
 const TARGET_AUDIO_BITRATE = 96_000
 const TARGET_AUDIO_SR = 48_000
 const TARGET_AUDIO_CHANNELS = 2
@@ -160,11 +161,11 @@ async function optimizeVideo (file, { onProgress } = {}) {
 }
 
 async function selectVideoEncoderConfig ({ width, height, fps }) {
-  const hevc = { codec: 'hvc1.1.4.L123.B0', width, height, framerate: fps, hardwareAcceleration: 'prefer-hardware', hevc: { format: 'hevc' } }
+  const hevc = { codec: 'hvc1.1.4.L123.B0', width, height, framerate: fps, bitrate: TARGET_VIDEO_BITRATE, hardwareAcceleration: 'prefer-hardware', hevc: { format: 'hevc' } }
   const supH = await VideoEncoder.isConfigSupported(hevc).catch(() => ({ supported: false }))
   if (supH.supported) return { codecId: 'hevc', config: supH.config }
 
-  const avc = { codec: 'avc1.64002A', width, height, framerate: fps, hardwareAcceleration: 'prefer-hardware', avc: { format: 'avc' } }
+  const avc = { codec: 'avc1.64002A', width, height, framerate: fps, bitrate: TARGET_VIDEO_BITRATE, hardwareAcceleration: 'prefer-hardware', avc: { format: 'avc' } }
   const supA = await VideoEncoder.isConfigSupported(avc)
   return { codecId: 'avc', config: supA.config }
 }
@@ -684,7 +685,7 @@ async function encodeVideo ({ file, srcMeta, plan, onProgress }) {
     const { chunk } = pendingPackets[i]
     const data = new Uint8Array(chunk.byteLength); chunk.copyTo(data)
     const ts = i * step; const dur = step
-    const pkt = new EncodedPacket(data, chunk.type === 'key' ? 'key' : 'delta', ts, dur)
+    const pkt = new EncodedPacket(data, i === 0 || chunk.type === 'key' ? 'key' : 'delta', ts, dur)
     await videoTrack.add(pkt, { decoderConfig: { codec: usedCfg.codec, codedWidth: targetWidth, codedHeight: targetHeight, description: codecDesc } })
   }
 

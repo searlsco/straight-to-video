@@ -119,7 +119,7 @@ test('4K 16:9 optimizes to spec and quality holds', async ({ page }) => {
   const s = json.summary
   expect(String(s.format_name)).toBe('mov,mp4,m4a,3gp,3g2,mj2')
   expect(String(s.vcodec)).toMatch(/^(hevc|h264)$/)
-  expect(String(s.pix_fmt)).toMatch(/yuv420p/i)
+  expect(String(s.pix_fmt)).toMatch(/^yuvj?420p$/i)
   expect(Number(s.width)).toBe(1920)
   expect(Number(s.height)).toBe(1080)
   expect(Number(s.fps)).toBeGreaterThanOrEqual(50)
@@ -166,7 +166,7 @@ test('4K square silent → 1920×1920 with silent AAC', async ({ page }) => {
   const json = await submitViaForm(page, input)
   const s = json.summary
   expect(String(s.vcodec)).toMatch(/^(hevc|h264)$/)
-  expect(String(s.pix_fmt)).toMatch(/yuv420p/i)
+  expect(String(s.pix_fmt)).toMatch(/^yuvj?420p$/i)
   expect(Number(s.width)).toBe(1920)
   expect(Number(s.height)).toBe(1920)
   expect(Number(s.fps)).toBeGreaterThanOrEqual(50)
@@ -180,6 +180,14 @@ test('4K square silent → 1920×1920 with silent AAC', async ({ page }) => {
   const rms = Math.sqrt(samples.reduce((acc, x) => acc + x * x, 0) / Math.max(1, samples.length))
   expect(rms).toBeLessThanOrEqual(1e-4)
   assertInstagramStrict(s, outPath)
+})
+
+test('4K square output stays within the video bitrate limit', async ({ page }) => {
+  await page.goto('/test/pages/optimize.html')
+  const json = await submitViaForm(page, 'test/fixtures/4k_square_silent.mp4')
+  const video = json.probe.streams.find(stream => stream.codec_type === 'video')
+
+  expect(Number(video.bit_rate) / 1_000_000).toBeLessThanOrEqual(25)
 })
 
 test('non-video passthrough (PNG) is byte-identical', async ({ page }) => {
@@ -219,7 +227,7 @@ test('1080p portrait MP4 optimizes to spec (2k_9_16.mp4)', async ({ page }) => {
   const s = json.summary
   expect(String(s.format_name)).toBe('mov,mp4,m4a,3gp,3g2,mj2')
   expect(String(s.vcodec)).toMatch(/^(hevc|h264)$/)
-  expect(String(s.pix_fmt)).toMatch(/yuv420p/i)
+  expect(String(s.pix_fmt)).toMatch(/^yuvj?420p$/i)
   expect(Number(s.width)).toBe(1080)
   expect(Number(s.height)).toBe(1920)
   expect(Number(s.fps)).toBeGreaterThanOrEqual(25)
@@ -254,7 +262,7 @@ test('1080p portrait MOV optimizes and normalizes to MP4 (2k_9_16.mov)', async (
   const s = json.summary
   expect(String(s.format_name)).toBe('mov,mp4,m4a,3gp,3g2,mj2')
   expect(String(s.vcodec)).toMatch(/^(hevc|h264)$/)
-  expect(String(s.pix_fmt)).toMatch(/yuv420p/i)
+  expect(String(s.pix_fmt)).toMatch(/^yuvj?420p$/i)
   // Dimensions: portrait, long side ≤ 1920, width ≤ 1080 (allow source‑dependent rounding)
   expect(Number(s.height)).toBeGreaterThan(Number(s.width))
   expect(Number(s.height)).toBeLessThanOrEqual(1920)
@@ -280,7 +288,7 @@ test('4K portrait MOV optimizes to spec and quality holds (4k_9_16.mov)', async 
   const s = json.summary
   expect(String(s.format_name)).toBe('mov,mp4,m4a,3gp,3g2,mj2')
   expect(String(s.vcodec)).toMatch(/^(hevc|h264)$/)
-  expect(String(s.pix_fmt)).toMatch(/yuv420p/i)
+  expect(String(s.pix_fmt)).toMatch(/^yuvj?420p$/i)
   // Expect exact portrait target size for 4K → 1080×1920
   expect(Number(s.width)).toBe(1080)
   expect(Number(s.height)).toBe(1920)

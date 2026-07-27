@@ -45,7 +45,7 @@ export function assertInstagramStrict(summary, filePath) {
   expect(String(summary.format_name)).toMatch(/mp4|mov|m4a|3gp|3g2|mj2/i)
   // Codecs + pixel format
   expect(String(summary.vcodec)).toMatch(/^(hevc|h264)$/)
-  expect(String(summary.pix_fmt)).toMatch(/yuv420p/i)
+  expect(String(summary.pix_fmt)).toMatch(/^yuvj?420p$/i)
   // Fast start
   expect(Boolean(summary.moov_front)).toBe(true)
   // Audio

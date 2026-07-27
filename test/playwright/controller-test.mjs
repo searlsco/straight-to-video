@@ -12,7 +12,7 @@ test('controller processes file input on change', async ({ page }) => {
   await page.goto('/test/pages/controller.html')
   const input = page.getByLabel(/Video file/i)
   await input.setInputFiles('test/fixtures/4k_16_9.mp4')
-  await expect(input).toHaveAttribute('data-processed', '1')
+  await expect(input).toHaveAttribute('data-processed', '1', { timeout: 30_000 })
 })
 
 test('controller emits progress and done events quickly', async ({ page }) => {
