@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.0.11
+
+* Work around WebKit labeling the requested first HEVC keyframe as a delta packet.
+* Keep browser-encoded video below the 25 Mbps delivery limit.
+* Accept WebKit's full-range `yuvj420p` output as progressive 4:2:0 video.
+
 ## 0.0.10
 
 - Fix Safari macOS Tahoe bug where native video controls never auto-hide by rewriting the moov atom to match ffmpeg's conventions (zero timestamps, standard handler names, edts/elst, extended esds, btrt, sgpd/sbgp)
