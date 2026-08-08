@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.0.12
+
+* Bound the WebCodecs encoder queue so long videos cannot exhaust WebKit memory.
+* Keep browser encoding at or below the source video's bitrate.
+
 ## 0.0.11
 
 * Work around WebKit labeling the requested first HEVC keyframe as a delta packet.
