@@ -15,6 +15,7 @@ const TARGET_AUDIO_BITRATE = 96_000
 const TARGET_AUDIO_SR = 48_000
 const TARGET_AUDIO_CHANNELS = 2
 const MAX_VIDEO_ENCODER_QUEUE_SIZE = 4
+const KEY_FRAME_INTERVAL_SECONDS = 2
 
 // ----- Video metadata probe -----
 async function probeVideo (file) {
@@ -205,6 +206,14 @@ function shouldDecodeViaVideoElement () {
   return (navigator?.vendor || '').includes('Apple')
 }
 
+// Encoders only emit keyframes when asked (WebKit's VideoToolbox never adds
+// its own), so request one every KEY_FRAME_INTERVAL_SECONDS or players get a
+// single sync sample for the whole video and cannot recover from seeks or
+// dropped frames.
+function keyFramesEveryNthFrame (step) {
+  return Math.max(1, Math.round(KEY_FRAME_INTERVAL_SECONDS / step))
+}
+
 async function applyVideoEncoderBackpressure (encoder) {
   while (encoder.encodeQueueSize > MAX_VIDEO_ENCODER_QUEUE_SIZE) {
     await new Promise(resolve => setTimeout(resolve, 0))
@@ -259,6 +268,7 @@ async function encodeFramesViaVideoElement ({ file, durationCfr, step, frames, c
     }
   })
 
+  const keyFrameEvery = keyFramesEveryNthFrame(step)
   for (let i = 0; i < frames; i++) {
     const t = i * step
     const drawTime = Math.min(Math.max(0, t + (step * 0.5)), Math.max(0.000001, durationCfr - 0.000001))
@@ -273,7 +283,7 @@ async function encodeFramesViaVideoElement ({ file, durationCfr, step, frames, c
 
     ctx.drawImage(v, 0, 0, canvas.width, canvas.height)
     const vf = new VideoFrame(canvas, { timestamp: Math.round(t * 1e6), duration: Math.round(step * 1e6) })
-    ve.encode(vf, { keyFrame: i === 0 })
+    ve.encode(vf, { keyFrame: i % keyFrameEvery === 0 })
     vf.close()
     await applyVideoEncoderBackpressure(ve)
 
@@ -303,6 +313,7 @@ async function encodeFramesViaVideoSampleSink ({ file, durationCfr, step, frames
     sample.drawWithFit(ctx, { fit: 'fill' })
   }
 
+  const keyFrameEvery = keyFramesEveryNthFrame(step)
   let i = 0
   let prev = null
   let prevStart = 0
@@ -320,7 +331,7 @@ async function encodeFramesViaVideoSampleSink ({ file, durationCfr, step, frames
         if (displayTime < prevStart || displayTime >= end) break
         const t = i * step
         const vf = new VideoFrame(canvas, { timestamp: Math.round(t * 1e6), duration: Math.round(step * 1e6) })
-        ve.encode(vf, { keyFrame: i === 0 })
+        ve.encode(vf, { keyFrame: i % keyFrameEvery === 0 })
         vf.close()
         await applyVideoEncoderBackpressure(ve)
 
@@ -347,7 +358,7 @@ async function encodeFramesViaVideoSampleSink ({ file, durationCfr, step, frames
     while (i < frames) {
       const t = i * step
       const vf = new VideoFrame(canvas, { timestamp: Math.round(t * 1e6), duration: Math.round(step * 1e6) })
-      ve.encode(vf, { keyFrame: i === 0 })
+      ve.encode(vf, { keyFrame: i % keyFrameEvery === 0 })
       vf.close()
       await applyVideoEncoderBackpressure(ve)
 
@@ -497,6 +508,7 @@ function _extractTrack (u8, dv, trakBox) {
   const stszBox = stblKids.find(b => b.type === 'stsz')
   const stcoBox = stblKids.find(b => b.type === 'stco')
   const stssBox = stblKids.find(b => b.type === 'stss')
+  const cttsBox = stblKids.find(b => b.type === 'ctts')
   if (!stsdBox || !sttsBox || !stscBox || !stszBox || !stcoBox) return null
 
   const sampleCount = dv.getUint32(stszBox.offset + 16)
@@ -508,6 +520,9 @@ function _extractTrack (u8, dv, trakBox) {
   const stscBody = u8.slice(stscBox.offset + 12, stscBox.offset + stscBox.size)
   const stszBody = u8.slice(stszBox.offset + 12, stszBox.offset + stszBox.size)
   const stssBody = stssBox ? u8.slice(stssBox.offset + 12, stssBox.offset + stssBox.size) : null
+  // Copied whole (header included) to keep its version: mediabunny writes
+  // version 1 (signed offsets), which _full would misdeclare as version 0
+  const cttsRaw = cttsBox ? u8.slice(cttsBox.offset, cttsBox.offset + cttsBox.size) : null
 
   const entryOff = stsdBox.offset + 16
   const entrySize = dv.getUint32(entryOff)
@@ -545,7 +560,7 @@ function _extractTrack (u8, dv, trakBox) {
     tkDur, tkW, tkH, mdTs, mdDur, mdLang,
     videoCodecConfig, audioSpecificConfig,
     audioChannels, audioSampleSize, audioSampleRate,
-    sttsBody, stscBody, stszBody, stssBody,
+    sttsBody, stscBody, stszBody, stssBody, cttsRaw,
     stcoEntries, sampleCount, bitrate
   }
 }
@@ -614,6 +629,7 @@ function _buildTrak (t) {
   const stss = t.stssBody ? _full('stss', 0, 0, t.stssBody) : null
 
   const stblParts = [stsd, stts]
+  if (t.cttsRaw) stblParts.push(t.cttsRaw)
   if (stss) stblParts.push(stss)
   stblParts.push(stsc, stsz, stco)
   if (t.isAudio) {
@@ -792,11 +808,14 @@ async function encodeVideo ({ file, srcMeta, plan, onProgress }) {
 
     const muxCount = Math.min(frames, pendingPackets.length)
     videoDuration = muxCount * step
+    const keyFrameEvery = keyFramesEveryNthFrame(step)
     for (let i = 0; i < muxCount; i++) {
       const { chunk } = pendingPackets[i]
       const data = new Uint8Array(chunk.byteLength); chunk.copyTo(data)
       const ts = i * step; const dur = step
-      const pkt = new EncodedPacket(data, i === 0 || chunk.type === 'key' ? 'key' : 'delta', ts, dur)
+      // WebKit labels requested keyframes as delta chunks, so trust the
+      // request cadence over chunk.type when marking sync samples
+      const pkt = new EncodedPacket(data, i % keyFrameEvery === 0 || chunk.type === 'key' ? 'key' : 'delta', ts, dur)
       await videoTrack.add(pkt, { decoderConfig: { codec: encoder.config.codec, codedWidth: targetWidth, codedHeight: targetHeight, description: codecDesc } })
     }
   }

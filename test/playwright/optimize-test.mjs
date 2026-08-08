@@ -30,6 +30,17 @@ function videoBitrate(path) {
 function videoPacketHash(path) {
   return run('ffmpeg', ['-v', 'error', '-i', path, '-map', '0:v:0', '-c', 'copy', '-f', 'hash', '-hash', 'sha256', '-']).trim()
 }
+function videoPacketTimes(path) {
+  const out = run('ffprobe', ['-v', 'error', '-select_streams', 'v:0', '-show_entries', 'packet=pts_time,dts_time', '-of', 'csv=p=0', path]).trim()
+  return out.split('\n').filter(Boolean).map(line => {
+    const [pts, dts] = line.split(',').map(parseFloat)
+    return { pts, dts }
+  })
+}
+function keyframeTimes(path) {
+  const out = run('ffprobe', ['-v', 'error', '-select_streams', 'v:0', '-show_entries', 'packet=pts_time,flags', '-of', 'csv=p=0', path]).trim()
+  return out.split('\n').filter(line => line.includes('K')).map(line => parseFloat(line))
+}
 function effectiveFpsViaMpdecimate(path, { hi = '64*5', lo = '64*1', frac = 0.33 } = {}) {
   const vf = `scale=360:640:flags=bicubic,mpdecimate=hi=${hi}:lo=${lo}:frac=${frac},showinfo`
   const err = runErr('ffmpeg', ['-loglevel', 'info', '-i', path, '-vf', vf, '-an', '-f', 'null', '-'])
@@ -384,6 +395,53 @@ test('output moov matches ffmpeg conventions (Safari Tahoe controls fix)', async
 
   // Output should be valid and playable
   assertInstagramStrict(json.summary, outPath)
+})
+
+test('compliant B-frame input keeps presentation order through passthrough', async ({ page }) => {
+  const clip = `test/tmp/${Date.now()}-bframes-faststart.mp4`
+  execFileSync('ffmpeg', ['-v', 'error', '-y',
+    '-f', 'lavfi', '-i', 'testsrc2=size=320x240:rate=30:duration=2',
+    '-f', 'lavfi', '-i', 'anullsrc=r=48000:cl=stereo',
+    '-shortest', '-c:v', 'libx264', '-profile:v', 'high', '-bf', '2', '-x264-params', 'b-adapt=0',
+    '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-movflags', '+faststart', clip])
+  const inTimes = videoPacketTimes(clip)
+  // Fixture sanity: B-frames make presentation timestamps arrive out of order
+  expect(inTimes.some((p, i) => i > 0 && p.pts < inTimes[i - 1].pts)).toBe(true)
+
+  await page.goto('/test/pages/optimize.html')
+  const json = await submitViaForm(page, clip)
+  const outPath = json.file.path
+
+  expect(videoPacketHash(outPath)).toBe(videoPacketHash(clip))
+  const outTimes = videoPacketTimes(outPath)
+  expect(outTimes.length).toBe(inTimes.length)
+  for (let i = 0; i < inTimes.length; i++) {
+    expect(Math.abs(outTimes[i].pts - inTimes[i].pts)).toBeLessThanOrEqual(0.002)
+  }
+  expect(Boolean(json.summary.moov_front)).toBe(true)
+  fs.rmSync(clip, { force: true })
+})
+
+test('re-encoded output gets a keyframe at least every 2.5 seconds', async ({ page }) => {
+  const clip = `test/tmp/${Date.now()}-highfps.mp4`
+  execFileSync('ffmpeg', ['-v', 'error', '-y',
+    '-f', 'lavfi', '-i', 'testsrc2=size=320x240:rate=62:duration=8',
+    '-f', 'lavfi', '-i', 'anullsrc=r=48000:cl=stereo',
+    '-shortest', '-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-movflags', '+faststart', clip])
+
+  await page.goto('/test/pages/optimize.html')
+  const json = await submitViaForm(page, clip)
+  const outPath = json.file.path
+
+  // 62fps exceeds the copy threshold, so this exercises the re-encode path
+  expect(videoPacketHash(outPath)).not.toBe(videoPacketHash(clip))
+  const keys = keyframeTimes(outPath)
+  expect(keys.length).toBeGreaterThanOrEqual(3)
+  expect(keys[0]).toBeLessThanOrEqual(0.05)
+  let maxGap = videoDuration(outPath) - keys[keys.length - 1]
+  for (let i = 1; i < keys.length; i++) maxGap = Math.max(maxGap, keys[i] - keys[i - 1])
+  expect(maxGap).toBeLessThanOrEqual(2.5)
+  fs.rmSync(clip, { force: true })
 })
 
 test('MP4 keeps motion cadence (2k_9_16.mp4)', async ({ page }) => {

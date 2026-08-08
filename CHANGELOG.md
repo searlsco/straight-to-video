@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.0.14
+
+* Preserve B-frame presentation timestamps (`ctts`) when normalizing the MP4 container, fixing juddery playback of compliant uploads that were re-muxed on the passthrough path.
+* Request an encoder keyframe every 2 seconds so re-encoded videos can recover from seeks, dropped frames, and downstream transcoding (previously the entire video had a single keyframe).
+
 ## 0.0.13
 
 * Fast-start already-compliant MP4 and MOV uploads without re-encoding their media packets.
