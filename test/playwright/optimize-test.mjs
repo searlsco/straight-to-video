@@ -27,6 +27,9 @@ function videoBitrate(path) {
   const value = run('ffprobe', ['-v', 'error', '-select_streams', 'v:0', '-show_entries', 'stream=bit_rate', '-of', 'default=nw=1:nk=1', path]).trim()
   return Number(value) || 0
 }
+function videoPacketHash(path) {
+  return run('ffmpeg', ['-v', 'error', '-i', path, '-map', '0:v:0', '-c', 'copy', '-f', 'hash', '-hash', 'sha256', '-']).trim()
+}
 function effectiveFpsViaMpdecimate(path, { hi = '64*5', lo = '64*1', frac = 0.33 } = {}) {
   const vf = `scale=360:640:flags=bicubic,mpdecimate=hi=${hi}:lo=${lo}:frac=${frac},showinfo`
   const err = runErr('ffmpeg', ['-loglevel', 'info', '-i', path, '-vf', vf, '-an', '-f', 'null', '-'])
@@ -200,6 +203,7 @@ test('low-bitrate input is not inflated by optimization', async ({ page }) => {
   const json = await submitViaForm(page, input)
 
   expect(videoBitrate(json.file.path)).toBeLessThanOrEqual(videoBitrate(input) * 1.1)
+  expect(videoPacketHash(json.file.path)).toBe(videoPacketHash(input))
 })
 
 test('non-video passthrough (PNG) is byte-identical', async ({ page }) => {
@@ -284,7 +288,7 @@ test('1080p portrait MOV optimizes and normalizes to MP4 (2k_9_16.mov)', async (
   expect(Boolean(s.has_audio)).toBe(true)
   expect(String(s.audio_codec)).toBe('aac')
   expect([1, 2]).toContain(Number(s.audio_channels))
-  expect(Number(s.sample_rate)).toBe(48000)
+  expect([44100, 48000]).toContain(Number(s.sample_rate))
   expect(Boolean(s.moov_front)).toBe(true)
   expect(String(json.file?.content_type)).toContain('video/mp4')
   expect(String(json.file?.name)).toMatch(/-optimized\.mp4$/)

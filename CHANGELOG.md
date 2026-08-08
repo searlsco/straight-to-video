@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.0.13
+
+* Fast-start already-compliant MP4 and MOV uploads without re-encoding their media packets.
+* Preserve compatible 44.1 kHz and 48 kHz AAC audio on the compliant-media path.
+
 ## 0.0.12
 
 * Bound the WebCodecs encoder queue so long videos cannot exhaust WebKit memory.

@@ -4,7 +4,8 @@
 import {
   Input, ALL_FORMATS, BlobSource, AudioBufferSink,
   Output, Mp4OutputFormat, BufferTarget,
-  AudioSampleSource, AudioSample, EncodedVideoPacketSource, EncodedPacket, EncodedPacketSink, VideoSampleSink
+  AudioSampleSource, AudioSample, EncodedVideoPacketSource, EncodedPacket, EncodedPacketSink, VideoSampleSink,
+  EncodedAudioPacketSource
 } from 'mediabunny'
 
 // ----- Constants -----
@@ -39,7 +40,7 @@ async function estimateSourceVideoStats (file) {
     const input = new Input({ source: new BlobSource(file), formats: ALL_FORMATS })
     const tracks = await input.getTracks()
     const video = tracks.find(t => typeof t.isVideoTrack === 'function' && t.isVideoTrack())
-    if (!video) return { fps: 0, bitrate: 0 }
+    if (!video) return { fps: 0, bitrate: 0, codec: null, rotation: 0 }
     const sink = new EncodedPacketSink(video)
     const durations = []
     let firstTimestamp = Infinity
@@ -55,25 +56,33 @@ async function estimateSourceVideoStats (file) {
       }
       if (durations.length >= 120) break
     }
-    if (!durations.length) return { fps: 0, bitrate: 0 }
+    if (!durations.length) return { fps: 0, bitrate: 0, codec: video.codec, rotation: video.rotation }
     durations.sort((a, b) => a - b)
     const duration = durations[Math.floor(durations.length / 2)]
     const sampledDuration = lastTimestamp - firstTimestamp
     return {
       fps: Number.isFinite(duration) && duration > 0 ? (1 / duration) : 0,
-      bitrate: sampledDuration > 0 ? (totalBytes * 8 / sampledDuration) : 0
+      bitrate: sampledDuration > 0 ? (totalBytes * 8 / sampledDuration) : 0,
+      codec: video.codec,
+      rotation: video.rotation
     }
   } catch (_) {
-    return { fps: 0, bitrate: 0 }
+    return { fps: 0, bitrate: 0, codec: null, rotation: 0 }
   }
 }
 
-async function determineEncodingPlan (file, { width, height }) {
+async function determineEncodingPlan (file, { width, height, duration }) {
   const maxFps = Math.max(width, height) <= 1920 ? 30 : 60
   const source = await estimateSourceVideoStats(file)
+  const copyVideo = ['avc', 'hevc'].includes(source.codec) &&
+    source.rotation === 0 &&
+    Math.max(width, height) <= MAX_LONG_SIDE &&
+    source.fps >= 23 && source.fps <= 60.1 &&
+    Number(duration) > 0 && (file.size * 8 / Number(duration)) <= TARGET_VIDEO_BITRATE
   return {
-    fps: maxFps === 30 ? 30 : (source.fps >= 45 ? 60 : 30),
-    bitrate: source.bitrate > 0 ? Math.min(TARGET_VIDEO_BITRATE, Math.round(source.bitrate)) : TARGET_VIDEO_BITRATE
+    fps: copyVideo ? source.fps : (maxFps === 30 ? 30 : (source.fps >= 45 ? 60 : 30)),
+    bitrate: source.bitrate > 0 ? Math.min(TARGET_VIDEO_BITRATE, Math.round(source.bitrate)) : TARGET_VIDEO_BITRATE,
+    copyVideo
   }
 }
 
@@ -138,8 +147,8 @@ async function canOptimizeVideo (file) {
     const scale = Math.min(1, MAX_LONG_SIDE / Math.max(2, long))
     const targetWidth = Math.max(2, Math.round(width * scale))
     const targetHeight = Math.max(2, Math.round(height * scale))
-    const plan = await determineEncodingPlan(file, { width, height })
-    const sup = await selectVideoEncoderConfig({ width: targetWidth, height: targetHeight, ...plan }).then(() => true).catch(() => false)
+    const plan = await determineEncodingPlan(file, { width, height, duration })
+    const sup = plan.copyVideo || await selectVideoEncoderConfig({ width: targetWidth, height: targetHeight, ...plan }).then(() => true).catch(() => false)
     if (!sup) return { ok: false, reason: 'unsupported-video-config', message: 'No supported encoder configuration for this resolution on this device.' }
 
     // Header sniffing when file.type is empty/incorrect
@@ -168,6 +177,14 @@ async function optimizeVideo (file, { onProgress } = {}) {
   if (typeof window === 'undefined' || !('VideoEncoder' in window)) return { changed: false, file }
   const feas = await canOptimizeVideo(file)
   if (!feas.ok) return { changed: false, file }
+
+  if (feas.plan.copyVideo) {
+    const fastStarted = await fastStartMp4(file)
+    if (fastStarted) {
+      if (typeof onProgress === 'function') onProgress(1)
+      return { changed: true, file: fastStarted }
+    }
+  }
 
   const srcMeta = await probeVideo(file)
   const newFile = await encodeVideo({ file, srcMeta: { w: srcMeta.width, h: srcMeta.height, duration: srcMeta.duration }, plan: feas.plan, onProgress })
@@ -393,6 +410,35 @@ function _scanBoxes (u8, start, end) {
     pos += sz
   }
   return out
+}
+
+async function fastStartMp4 (file) {
+  const u8 = new Uint8Array(await file.arrayBuffer())
+  const boxes = _scanBoxes(u8, 0, u8.byteLength)
+  const ftyp = boxes.find(b => b.type === 'ftyp')
+  const mdat = boxes.find(b => b.type === 'mdat')
+  const moov = boxes.find(b => b.type === 'moov')
+  if (!ftyp || !mdat || !moov || ftyp.offset !== 0 || moov.offset < mdat.offset) return null
+
+  const relocatedMoov = u8.slice(moov.offset, moov.offset + moov.size)
+  const dv = new DataView(relocatedMoov.buffer, relocatedMoov.byteOffset, relocatedMoov.byteLength)
+  for (let i = 0; i < relocatedMoov.byteLength - 16; i++) {
+    if (relocatedMoov[i + 4] !== 0x73 || relocatedMoov[i + 5] !== 0x74 || relocatedMoov[i + 6] !== 0x63 || relocatedMoov[i + 7] !== 0x6f) continue
+    const count = dv.getUint32(i + 12)
+    if (i + 16 + count * 4 > relocatedMoov.byteLength) return null
+    for (let j = 0; j < count; j++) {
+      const offset = i + 16 + j * 4
+      dv.setUint32(offset, dv.getUint32(offset) + moov.size)
+    }
+  }
+
+  const payload = _concat(
+    u8.slice(ftyp.offset, ftyp.offset + ftyp.size),
+    relocatedMoov,
+    ...boxes.filter(box => box !== ftyp && box !== moov).map(box => u8.slice(box.offset, box.offset + box.size))
+  )
+  const dot = file.name.lastIndexOf('.')
+  return new File([payload], `${file.name.substring(0, dot)}-optimized.mp4`, { type: 'video/mp4', lastModified: Date.now() })
 }
 
 function _esdTag (tag, payload) {
@@ -650,77 +696,122 @@ async function encodeVideo ({ file, srcMeta, plan, onProgress }) {
   const targetWidth = Math.max(2, Number(plan?.width) || Math.round(w * scale))
   const targetHeight = Math.max(2, Number(plan?.height) || Math.round(h * scale))
 
-  const fallbackPlan = plan || await determineEncodingPlan(file, { width: w, height: h })
+  const fallbackPlan = plan || await determineEncodingPlan(file, { width: w, height: h, duration: durationCfr })
   const targetFps = Math.max(1, Number(fallbackPlan.fps))
   const step = 1 / Math.max(1, targetFps)
   const frames = Math.max(1, Math.floor(durationCfr / step))
 
   const output = new Output({ format: new Mp4OutputFormat({ fastStart: 'in-memory' }), target: new BufferTarget() })
-  const { codecId, config: usedCfg } = await selectVideoEncoderConfig({ width: targetWidth, height: targetHeight, fps: targetFps, bitrate: fallbackPlan.bitrate })
-  const videoTrack = new EncodedVideoPacketSource(codecId)
-  output.addVideoTrack(videoTrack, { frameRate: targetFps })
+  const passthroughInput = fallbackPlan.copyVideo ? new Input({ source: new BlobSource(file), formats: ALL_FORMATS }) : null
+  const passthroughTracks = passthroughInput ? await passthroughInput.getTracks() : []
+  const passthroughTrack = passthroughTracks.find(t => typeof t.isVideoTrack === 'function' && t.isVideoTrack())
+  const passthroughAudioTrack = passthroughTrack && passthroughTracks.find(t =>
+    typeof t.isAudioTrack === 'function' && t.isAudioTrack() &&
+    t.codec === 'aac' && [1, 2].includes(t.numberOfChannels) && [44_100, 48_000].includes(t.sampleRate)
+  )
+  const encoder = passthroughTrack ? null : await selectVideoEncoderConfig({ width: targetWidth, height: targetHeight, fps: targetFps, bitrate: fallbackPlan.bitrate })
+  const videoTrack = new EncodedVideoPacketSource(passthroughTrack?.codec || encoder.codecId)
+  output.addVideoTrack(videoTrack, passthroughTrack ? { rotation: passthroughTrack.rotation } : { frameRate: targetFps })
 
-  const _warn = console.warn
-  console.warn = (...args) => {
-    const m = args && args[0]
-    if (typeof m === 'string' && m.includes('Unsupported audio codec') && m.includes('apac')) return
-    _warn.apply(console, args)
-  }
-  const audioBuffer = await decodeAudioPCM(file, { duration: durationCfr })
-  console.warn = _warn
-
-  const audioSource = new AudioSampleSource({
-    codec: 'aac',
-    bitrate: TARGET_AUDIO_BITRATE,
-    bitrateMode: 'constant',
-    numberOfChannels: TARGET_AUDIO_CHANNELS,
-    sampleRate: TARGET_AUDIO_SR,
-    onEncodedPacket: (_packet, meta) => {
-      const aot = 2; const idx = 3; const b0 = (aot << 3) | (idx >> 1); const b1 = ((idx & 1) << 7) | (TARGET_AUDIO_CHANNELS << 3)
-      meta.decoderConfig = { codec: 'mp4a.40.2', numberOfChannels: TARGET_AUDIO_CHANNELS, sampleRate: TARGET_AUDIO_SR, description: new Uint8Array([b0, b1]) }
+  let audioBuffer = null
+  if (!passthroughAudioTrack) {
+    const _warn = console.warn
+    console.warn = (...args) => {
+      const m = args && args[0]
+      if (typeof m === 'string' && m.includes('Unsupported audio codec') && m.includes('apac')) return
+      _warn.apply(console, args)
     }
-  })
+    audioBuffer = await decodeAudioPCM(file, { duration: durationCfr })
+    console.warn = _warn
+  }
+
+  const audioSource = passthroughAudioTrack
+    ? new EncodedAudioPacketSource('aac')
+    : new AudioSampleSource({
+        codec: 'aac',
+        bitrate: TARGET_AUDIO_BITRATE,
+        bitrateMode: 'constant',
+        numberOfChannels: TARGET_AUDIO_CHANNELS,
+        sampleRate: TARGET_AUDIO_SR,
+        onEncodedPacket: (_packet, meta) => {
+          const aot = 2; const idx = 3; const b0 = (aot << 3) | (idx >> 1); const b1 = ((idx & 1) << 7) | (TARGET_AUDIO_CHANNELS << 3)
+          meta.decoderConfig = { codec: 'mp4a.40.2', numberOfChannels: TARGET_AUDIO_CHANNELS, sampleRate: TARGET_AUDIO_SR, description: new Uint8Array([b0, b1]) }
+        }
+      })
   output.addAudioTrack(audioSource)
 
   await output.start()
+  const passthroughAudioPromise = passthroughAudioTrack && (async () => {
+    const sink = new EncodedPacketSink(passthroughAudioTrack)
+    const decoderConfig = await passthroughAudioTrack.getDecoderConfig()
+    const firstTimestamp = await passthroughAudioTrack.getFirstTimestamp()
+    for await (const packet of sink.packets()) {
+      await audioSource.add(packet.clone({ timestamp: Math.max(0, packet.timestamp - firstTimestamp) }), { decoderConfig: decoderConfig || undefined })
+    }
+    audioSource.close()
+  })()
 
-  let codecDesc = null
-  const pendingPackets = []
-  const ve = new VideoEncoder({
-    output: (chunk, meta) => {
-      if (!codecDesc && meta?.decoderConfig?.description) codecDesc = meta.decoderConfig.description
-      pendingPackets.push({ chunk })
-    },
-    error: () => {}
-  })
-  ve.configure(usedCfg)
+  let videoDuration = durationCfr
+  if (passthroughTrack) {
+    const sink = new EncodedPacketSink(passthroughTrack)
+    const decoderConfig = await passthroughTrack.getDecoderConfig()
+    const firstTimestamp = await passthroughTrack.getFirstTimestamp()
+    videoDuration = 0
+    for await (const packet of sink.packets(undefined, undefined, { verifyKeyPackets: true })) {
+      const normalizedPacket = packet.clone({ timestamp: Math.max(0, packet.timestamp - firstTimestamp) })
+      await videoTrack.add(normalizedPacket, { decoderConfig: decoderConfig || undefined })
+      videoDuration = Math.max(videoDuration, normalizedPacket.timestamp + normalizedPacket.duration)
+      if (typeof onProgress === 'function') {
+        try {
+          onProgress(Math.min(1, videoDuration / durationCfr))
+        } catch (err) {
+          console.warn('straight-to-video: onProgress callback threw; ignoring error', err)
+        }
+      }
+    }
+    videoTrack.close()
+  } else {
+    let codecDesc = null
+    const pendingPackets = []
+    const ve = new VideoEncoder({
+      output: (chunk, meta) => {
+        if (!codecDesc && meta?.decoderConfig?.description) codecDesc = meta.decoderConfig.description
+        pendingPackets.push({ chunk })
+      },
+      error: () => {}
+    })
+    ve.configure(encoder.config)
 
-  const canvas = document.createElement('canvas'); canvas.width = targetWidth; canvas.height = targetHeight
-  const ctx = canvas.getContext('2d', { alpha: false })
+    const canvas = document.createElement('canvas'); canvas.width = targetWidth; canvas.height = targetHeight
+    const ctx = canvas.getContext('2d', { alpha: false })
 
-  await (shouldDecodeViaVideoElement()
-    ? encodeFramesViaVideoElement({ file, durationCfr, step, frames, canvas, ctx, ve, onProgress })
-    : encodeFramesViaVideoSampleSink({ file, durationCfr, step, frames, canvas, ctx, ve, onProgress }))
-  await ve.flush()
+    await (shouldDecodeViaVideoElement()
+      ? encodeFramesViaVideoElement({ file, durationCfr, step, frames, canvas, ctx, ve, onProgress })
+      : encodeFramesViaVideoSampleSink({ file, durationCfr, step, frames, canvas, ctx, ve, onProgress }))
+    await ve.flush()
 
-  const muxCount = Math.min(frames, pendingPackets.length)
-
-  for (let i = 0; i < muxCount; i++) {
-    const { chunk } = pendingPackets[i]
-    const data = new Uint8Array(chunk.byteLength); chunk.copyTo(data)
-    const ts = i * step; const dur = step
-    const pkt = new EncodedPacket(data, i === 0 || chunk.type === 'key' ? 'key' : 'delta', ts, dur)
-    await videoTrack.add(pkt, { decoderConfig: { codec: usedCfg.codec, codedWidth: targetWidth, codedHeight: targetHeight, description: codecDesc } })
+    const muxCount = Math.min(frames, pendingPackets.length)
+    videoDuration = muxCount * step
+    for (let i = 0; i < muxCount; i++) {
+      const { chunk } = pendingPackets[i]
+      const data = new Uint8Array(chunk.byteLength); chunk.copyTo(data)
+      const ts = i * step; const dur = step
+      const pkt = new EncodedPacket(data, i === 0 || chunk.type === 'key' ? 'key' : 'delta', ts, dur)
+      await videoTrack.add(pkt, { decoderConfig: { codec: encoder.config.codec, codedWidth: targetWidth, codedHeight: targetHeight, description: codecDesc } })
+    }
   }
 
-  const samplesPerVideoFrame = TARGET_AUDIO_SR / targetFps
-  const totalVideoSamples = muxCount * samplesPerVideoFrame
-  const targetSamples = Math.max(1024, Math.floor(totalVideoSamples / 1024) * 1024 - 2048)
-  const audioExact = await renderStereo48kExact(audioBuffer, targetSamples)
-  const interleaved = interleaveStereoF32(audioExact)
-  const sample = new AudioSample({ format: 'f32', sampleRate: TARGET_AUDIO_SR, numberOfChannels: TARGET_AUDIO_CHANNELS, timestamp: 0, data: interleaved })
-  await audioSource.add(sample)
-  audioSource.close()
+  if (passthroughAudioPromise) {
+    await passthroughAudioPromise
+  } else {
+    const totalVideoSamples = videoDuration * TARGET_AUDIO_SR
+    const targetSamples = Math.max(1024, Math.floor(totalVideoSamples / 1024) * 1024 - 2048)
+    const audioExact = await renderStereo48kExact(audioBuffer, targetSamples)
+    const interleaved = interleaveStereoF32(audioExact)
+    const sample = new AudioSample({ format: 'f32', sampleRate: TARGET_AUDIO_SR, numberOfChannels: TARGET_AUDIO_CHANNELS, timestamp: 0, data: interleaved })
+    await audioSource.add(sample)
+    audioSource.close()
+  }
   await output.finalize()
   const normalized = await normalizeMp4Container(output.target.buffer)
   const payload = new Uint8Array(normalized)

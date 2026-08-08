@@ -51,7 +51,7 @@ export function assertInstagramStrict(summary, filePath) {
   // Audio
   expect(String(summary.audio_codec)).toBe('aac')
   expect([1, 2]).toContain(Number(summary.audio_channels))
-  expect(Number(summary.sample_rate)).toBe(48000)
+  expect([44100, 48000]).toContain(Number(summary.sample_rate))
 
   // Generic FPS bounds
   const fps = Number(summary.fps)
