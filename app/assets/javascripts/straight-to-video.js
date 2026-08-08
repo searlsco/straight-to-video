@@ -14,6 +14,7 @@ const TARGET_VIDEO_BITRATE = 12_000_000
 const TARGET_AUDIO_BITRATE = 96_000
 const TARGET_AUDIO_SR = 48_000
 const TARGET_AUDIO_CHANNELS = 2
+const MAX_VIDEO_ENCODER_QUEUE_SIZE = 4
 
 // ----- Video metadata probe -----
 async function probeVideo (file) {
@@ -34,34 +35,47 @@ async function probeVideo (file) {
   })
 }
 
-async function estimateSourceVideoFps (file) {
+async function estimateSourceVideoStats (file) {
   try {
     const input = new Input({ source: new BlobSource(file), formats: ALL_FORMATS })
     const tracks = await input.getTracks()
     const video = tracks.find(t => typeof t.isVideoTrack === 'function' && t.isVideoTrack())
-    if (!video) return 0
+    if (!video) return { fps: 0, bitrate: 0 }
     const sink = new EncodedPacketSink(video)
     const durations = []
+    let firstTimestamp = Infinity
+    let lastTimestamp = -Infinity
+    let totalBytes = 0
     for await (const packet of sink.packets(undefined, undefined, { metadataOnly: true })) {
-      const dur = Number(packet?.duration)
-      if (packet.timestamp >= 0 && Number.isFinite(dur) && dur > 0) durations.push(dur)
+      const duration = Number(packet?.duration)
+      if (packet.timestamp >= 0 && Number.isFinite(duration) && duration > 0) {
+        durations.push(duration)
+        firstTimestamp = Math.min(firstTimestamp, packet.timestamp)
+        lastTimestamp = Math.max(lastTimestamp, packet.timestamp + duration)
+        totalBytes += packet.byteLength
+      }
       if (durations.length >= 120) break
     }
-    if (!durations.length) return 0
+    if (!durations.length) return { fps: 0, bitrate: 0 }
     durations.sort((a, b) => a - b)
-    const dur = durations[Math.floor(durations.length / 2)]
-    return Number.isFinite(dur) && dur > 0 ? (1 / dur) : 0
+    const duration = durations[Math.floor(durations.length / 2)]
+    const sampledDuration = lastTimestamp - firstTimestamp
+    return {
+      fps: Number.isFinite(duration) && duration > 0 ? (1 / duration) : 0,
+      bitrate: sampledDuration > 0 ? (totalBytes * 8 / sampledDuration) : 0
+    }
   } catch (_) {
-    return 0
+    return { fps: 0, bitrate: 0 }
   }
 }
 
-async function determineTargetFps (file, { width, height }) {
+async function determineEncodingPlan (file, { width, height }) {
   const maxFps = Math.max(width, height) <= 1920 ? 30 : 60
-  if (maxFps === 30) return 30
-
-  const fps = await estimateSourceVideoFps(file)
-  return fps >= 45 ? 60 : 30
+  const source = await estimateSourceVideoStats(file)
+  return {
+    fps: maxFps === 30 ? 30 : (source.fps >= 45 ? 60 : 30),
+    bitrate: source.bitrate > 0 ? Math.min(TARGET_VIDEO_BITRATE, Math.round(source.bitrate)) : TARGET_VIDEO_BITRATE
+  }
 }
 
 // ----- Audio helpers -----
@@ -125,8 +139,8 @@ async function canOptimizeVideo (file) {
     const scale = Math.min(1, MAX_LONG_SIDE / Math.max(2, long))
     const targetWidth = Math.max(2, Math.round(width * scale))
     const targetHeight = Math.max(2, Math.round(height * scale))
-    const fps = await determineTargetFps(file, { width, height })
-    const sup = await selectVideoEncoderConfig({ width: targetWidth, height: targetHeight, fps }).then(() => true).catch(() => false)
+    const plan = await determineEncodingPlan(file, { width, height })
+    const sup = await selectVideoEncoderConfig({ width: targetWidth, height: targetHeight, ...plan }).then(() => true).catch(() => false)
     if (!sup) return { ok: false, reason: 'unsupported-video-config', message: 'No supported encoder configuration for this resolution on this device.' }
 
     // Header sniffing when file.type is empty/incorrect
@@ -142,7 +156,7 @@ async function canOptimizeVideo (file) {
       const hasEbml = buf.length >= 4 && buf[0] === 0x1A && buf[1] === 0x45 && buf[2] === 0xDF && buf[3] === 0xA3
       if (!(hasFtyp || hasEbml)) return { ok: false, reason: 'unknown-container', message: 'Unrecognized container; expected MP4/MOV or WebM.' }
     }
-    return { ok: true, reason: 'ok', message: 'ok', plan: { width: targetWidth, height: targetHeight, fps } }
+    return { ok: true, reason: 'ok', message: 'ok', plan: { width: targetWidth, height: targetHeight, ...plan } }
   } catch (e) {
     return { ok: false, reason: 'probe-failed', message: String(e?.message || e) }
   }
@@ -161,18 +175,24 @@ async function optimizeVideo (file, { onProgress } = {}) {
   return { changed: true, file: newFile }
 }
 
-async function selectVideoEncoderConfig ({ width, height, fps }) {
-  const hevc = { codec: 'hvc1.1.4.L123.B0', width, height, framerate: fps, bitrate: TARGET_VIDEO_BITRATE, hardwareAcceleration: 'prefer-hardware', hevc: { format: 'hevc' } }
+async function selectVideoEncoderConfig ({ width, height, fps, bitrate = TARGET_VIDEO_BITRATE }) {
+  const hevc = { codec: 'hvc1.1.4.L123.B0', width, height, framerate: fps, bitrate, hardwareAcceleration: 'prefer-hardware', hevc: { format: 'hevc' } }
   const supH = await VideoEncoder.isConfigSupported(hevc).catch(() => ({ supported: false }))
   if (supH.supported) return { codecId: 'hevc', config: supH.config }
 
-  const avc = { codec: 'avc1.64002A', width, height, framerate: fps, bitrate: TARGET_VIDEO_BITRATE, hardwareAcceleration: 'prefer-hardware', avc: { format: 'avc' } }
+  const avc = { codec: 'avc1.64002A', width, height, framerate: fps, bitrate, hardwareAcceleration: 'prefer-hardware', avc: { format: 'avc' } }
   const supA = await VideoEncoder.isConfigSupported(avc)
   return { codecId: 'avc', config: supA.config }
 }
 
 function shouldDecodeViaVideoElement () {
   return (navigator?.vendor || '').includes('Apple')
+}
+
+async function applyVideoEncoderBackpressure (encoder) {
+  while (encoder.encodeQueueSize > MAX_VIDEO_ENCODER_QUEUE_SIZE) {
+    await new Promise(resolve => setTimeout(resolve, 0))
+  }
 }
 
 async function waitForFrameReady (video, budgetMs) {
@@ -239,6 +259,7 @@ async function encodeFramesViaVideoElement ({ file, durationCfr, step, frames, c
     const vf = new VideoFrame(canvas, { timestamp: Math.round(t * 1e6), duration: Math.round(step * 1e6) })
     ve.encode(vf, { keyFrame: i === 0 })
     vf.close()
+    await applyVideoEncoderBackpressure(ve)
 
     if (typeof onProgress === 'function') {
       try {
@@ -285,6 +306,7 @@ async function encodeFramesViaVideoSampleSink ({ file, durationCfr, step, frames
         const vf = new VideoFrame(canvas, { timestamp: Math.round(t * 1e6), duration: Math.round(step * 1e6) })
         ve.encode(vf, { keyFrame: i === 0 })
         vf.close()
+        await applyVideoEncoderBackpressure(ve)
 
         if (typeof onProgress === 'function') {
           try {
@@ -311,6 +333,7 @@ async function encodeFramesViaVideoSampleSink ({ file, durationCfr, step, frames
       const vf = new VideoFrame(canvas, { timestamp: Math.round(t * 1e6), duration: Math.round(step * 1e6) })
       ve.encode(vf, { keyFrame: i === 0 })
       vf.close()
+      await applyVideoEncoderBackpressure(ve)
 
       if (typeof onProgress === 'function') {
         try {
@@ -628,12 +651,13 @@ async function encodeVideo ({ file, srcMeta, plan, onProgress }) {
   const targetWidth = Math.max(2, Number(plan?.width) || Math.round(w * scale))
   const targetHeight = Math.max(2, Number(plan?.height) || Math.round(h * scale))
 
-  const targetFps = Math.max(1, Number(plan?.fps) || await determineTargetFps(file, { width: w, height: h }))
+  const fallbackPlan = plan || await determineEncodingPlan(file, { width: w, height: h })
+  const targetFps = Math.max(1, Number(fallbackPlan.fps))
   const step = 1 / Math.max(1, targetFps)
   const frames = Math.max(1, Math.floor(durationCfr / step))
 
   const output = new Output({ format: new Mp4OutputFormat({ fastStart: 'in-memory' }), target: new BufferTarget() })
-  const { codecId, config: usedCfg } = await selectVideoEncoderConfig({ width: targetWidth, height: targetHeight, fps: targetFps })
+  const { codecId, config: usedCfg } = await selectVideoEncoderConfig({ width: targetWidth, height: targetHeight, fps: targetFps, bitrate: fallbackPlan.bitrate })
   const videoTrack = new EncodedVideoPacketSource(codecId)
   output.addVideoTrack(videoTrack, { frameRate: targetFps })
 

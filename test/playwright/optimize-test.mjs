@@ -23,6 +23,10 @@ function videoAvgFps(path) {
   if (!s || s === '0/0') return 0; if (!s.includes('/')) return parseFloat(s) || 0
   const [a, b] = s.split('/'); const num = parseFloat(a); const den = parseFloat(b || '1'); return den === 0 ? 0 : (num / den)
 }
+function videoBitrate(path) {
+  const value = run('ffprobe', ['-v', 'error', '-select_streams', 'v:0', '-show_entries', 'stream=bit_rate', '-of', 'default=nw=1:nk=1', path]).trim()
+  return Number(value) || 0
+}
 function effectiveFpsViaMpdecimate(path, { hi = '64*5', lo = '64*1', frac = 0.33 } = {}) {
   const vf = `scale=360:640:flags=bicubic,mpdecimate=hi=${hi}:lo=${lo}:frac=${frac},showinfo`
   const err = runErr('ffmpeg', ['-loglevel', 'info', '-i', path, '-vf', vf, '-an', '-f', 'null', '-'])
@@ -188,6 +192,14 @@ test('4K square output stays within the video bitrate limit', async ({ page }) =
   const video = json.probe.streams.find(stream => stream.codec_type === 'video')
 
   expect(Number(video.bit_rate) / 1_000_000).toBeLessThanOrEqual(25)
+})
+
+test('low-bitrate input is not inflated by optimization', async ({ page }) => {
+  const input = 'test/fixtures/safari-controls-bug.mp4'
+  await page.goto('/test/pages/optimize.html')
+  const json = await submitViaForm(page, input)
+
+  expect(videoBitrate(json.file.path)).toBeLessThanOrEqual(videoBitrate(input) * 1.1)
 })
 
 test('non-video passthrough (PNG) is byte-identical', async ({ page }) => {
