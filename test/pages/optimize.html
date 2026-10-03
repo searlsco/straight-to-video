@@ -58,6 +58,8 @@
       const form = document.getElementById('demo-form')
       const input = document.getElementById('file')
       const useNoCt = document.getElementById('use-no-ct')
+      // Encoding options for tests, e.g. ?options={"maxLongSide":1280}
+      const encodingOptions = JSON.parse(new URLSearchParams(location.search).get('options') || '{}')
       const logEl = document.getElementById('log')
       const clearLogButton = document.getElementById('clear-log')
       const copyLogButton = document.getElementById('copy-log')
@@ -175,11 +177,12 @@
               type: srcFile.type
             })
           }
-          const feas = await canOptimizeVideo(srcFile)
+          const feas = await canOptimizeVideo(srcFile, encodingOptions)
           appendLog('submit.feasibility', feas)
           let outFile = srcFile
           if (feas.ok) {
             const r = await optimizeVideo(srcFile, {
+              ...encodingOptions,
               onProgress: (ratio) => {
                 const percent = Math.round(ratio * 100)
                 p.value = percent

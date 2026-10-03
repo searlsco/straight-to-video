@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+* `optimizeVideo` and `canOptimizeVideo` take optional `maxLongSide`, `videoBitrate` and `preferCodec` options. Defaults are unchanged.
+
 ## 0.0.14
 
 * Preserve B-frame presentation timestamps (`ctts`) when normalizing the MP4 container, fixing juddery playback of compliant uploads that were re-muxed on the passthrough path.

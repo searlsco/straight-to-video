@@ -208,6 +208,40 @@ test('4K square output stays within the video bitrate limit', async ({ page }) =
   expect(Number(video.bit_rate) / 1_000_000).toBeLessThanOrEqual(25)
 })
 
+test('options: maxLongSide and videoBitrate are honored', async ({ page }) => {
+  const options = { maxLongSide: 1280, videoBitrate: 2_500_000 }
+  await page.goto(`/test/pages/optimize.html?options=${encodeURIComponent(JSON.stringify(options))}`)
+  const json = await submitViaForm(page, 'test/fixtures/4k_16_9.mp4')
+  const s = json.summary
+
+  expect(Number(s.width)).toBe(1280)
+  expect(Number(s.height)).toBe(720)
+  expect(videoBitrate(json.file.path)).toBeLessThanOrEqual(2_500_000 * 1.25)
+  expect(Boolean(s.has_audio)).toBe(true)
+})
+
+test('options: preferCodec avc encodes H.264 where HEVC is available', async ({ page, browserName }) => {
+  // Playwright's WebKit reports avc1 as supported, then never emits a chunk.
+  test.skip(browserName === 'webkit', 'Playwright WebKit build cannot encode H.264')
+  const options = { preferCodec: 'avc' }
+  await page.goto(`/test/pages/optimize.html?options=${encodeURIComponent(JSON.stringify(options))}`)
+  const json = await submitViaForm(page, 'test/fixtures/4k_16_9.mp4')
+
+  expect(String(json.summary.vcodec)).toBe('h264')
+})
+
+test('options: an unknown preferCodec is refused, not ignored', async ({ page }) => {
+  await page.goto('/test/pages/optimize.html')
+  const result = await page.evaluate(async () => {
+    const { canOptimizeVideo } = await import('straight-to-video')
+    const blob = await (await fetch('/test/fixtures/2k_9_16.mp4')).blob()
+    return canOptimizeVideo(new File([blob], 'a.mp4', { type: 'video/mp4' }), { preferCodec: 'vp9' })
+  })
+
+  expect(result.ok).toBe(false)
+  expect(result.message).toMatch(/preferCodec/)
+})
+
 test('low-bitrate input is not inflated by optimization', async ({ page }) => {
   const input = 'test/fixtures/safari-controls-bug.mp4'
   await page.goto('/test/pages/optimize.html')

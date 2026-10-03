@@ -11,6 +11,11 @@ import {
 // ----- Constants -----
 const MAX_LONG_SIDE = 1920
 const TARGET_VIDEO_BITRATE = 12_000_000
+
+function resolveOptions ({ maxLongSide = MAX_LONG_SIDE, videoBitrate = TARGET_VIDEO_BITRATE, preferCodec = 'hevc' } = {}) {
+  if (!['hevc', 'avc'].includes(preferCodec)) throw new Error(`preferCodec must be 'hevc' or 'avc', got ${preferCodec}`)
+  return { maxLongSide, videoBitrate, preferCodec }
+}
 const TARGET_AUDIO_BITRATE = 96_000
 const TARGET_AUDIO_SR = 48_000
 const TARGET_AUDIO_CHANNELS = 2
@@ -72,17 +77,17 @@ async function estimateSourceVideoStats (file) {
   }
 }
 
-async function determineEncodingPlan (file, { width, height, duration }) {
+async function determineEncodingPlan (file, { width, height, duration }, opts = resolveOptions()) {
   const maxFps = Math.max(width, height) <= 1920 ? 30 : 60
   const source = await estimateSourceVideoStats(file)
-  const copyVideo = ['avc', 'hevc'].includes(source.codec) &&
+  const copyVideo = (opts.preferCodec === 'avc' ? source.codec === 'avc' : ['avc', 'hevc'].includes(source.codec)) &&
     source.rotation === 0 &&
-    Math.max(width, height) <= MAX_LONG_SIDE &&
+    Math.max(width, height) <= opts.maxLongSide &&
     source.fps >= 23 && source.fps <= 60.1 &&
-    Number(duration) > 0 && (file.size * 8 / Number(duration)) <= TARGET_VIDEO_BITRATE
+    Number(duration) > 0 && (file.size * 8 / Number(duration)) <= opts.videoBitrate
   return {
     fps: copyVideo ? source.fps : (maxFps === 30 ? 30 : (source.fps >= 45 ? 60 : 30)),
-    bitrate: source.bitrate > 0 ? Math.min(TARGET_VIDEO_BITRATE, Math.round(source.bitrate)) : TARGET_VIDEO_BITRATE,
+    bitrate: source.bitrate > 0 ? Math.min(opts.videoBitrate, Math.round(source.bitrate)) : opts.videoBitrate,
     copyVideo
   }
 }
@@ -135,7 +140,7 @@ function interleaveStereoF32 (buffer) {
 }
 
 // ----- Video pipeline -----
-async function canOptimizeVideo (file) {
+async function canOptimizeVideo (file, options = {}) {
   if (!(file instanceof File)) return { ok: false, reason: 'not-a-file', message: 'Argument provided is not a File.' }
   const env = typeof window !== 'undefined'
     && 'VideoEncoder' in window
@@ -143,13 +148,14 @@ async function canOptimizeVideo (file) {
     && typeof document?.createElement === 'function'
   if (!env) return { ok: false, reason: 'unsupported-environment', message: 'Browser does not support WebCodecs or OfflineAudioContext.' }
   try {
+    const opts = resolveOptions(options)
     const { width, height, duration } = await probeVideo(file)
     const long = Math.max(width, height)
-    const scale = Math.min(1, MAX_LONG_SIDE / Math.max(2, long))
+    const scale = Math.min(1, opts.maxLongSide / Math.max(2, long))
     const targetWidth = Math.max(2, Math.round(width * scale))
     const targetHeight = Math.max(2, Math.round(height * scale))
-    const plan = await determineEncodingPlan(file, { width, height, duration })
-    const sup = plan.copyVideo || await selectVideoEncoderConfig({ width: targetWidth, height: targetHeight, ...plan }).then(() => true).catch(() => false)
+    const plan = await determineEncodingPlan(file, { width, height, duration }, opts)
+    const sup = plan.copyVideo || await selectVideoEncoderConfig({ width: targetWidth, height: targetHeight, ...plan, preferCodec: opts.preferCodec }).then(() => true).catch(() => false)
     if (!sup) return { ok: false, reason: 'unsupported-video-config', message: 'No supported encoder configuration for this resolution on this device.' }
 
     // Header sniffing when file.type is empty/incorrect
@@ -165,18 +171,18 @@ async function canOptimizeVideo (file) {
       const hasEbml = buf.length >= 4 && buf[0] === 0x1A && buf[1] === 0x45 && buf[2] === 0xDF && buf[3] === 0xA3
       if (!(hasFtyp || hasEbml)) return { ok: false, reason: 'unknown-container', message: 'Unrecognized container; expected MP4/MOV or WebM.' }
     }
-    return { ok: true, reason: 'ok', message: 'ok', plan: { width: targetWidth, height: targetHeight, ...plan } }
+    return { ok: true, reason: 'ok', message: 'ok', plan: { width: targetWidth, height: targetHeight, ...plan, preferCodec: opts.preferCodec } }
   } catch (e) {
     return { ok: false, reason: 'probe-failed', message: String(e?.message || e) }
   }
 }
 
-async function optimizeVideo (file, { onProgress } = {}) {
+async function optimizeVideo (file, { onProgress, ...options } = {}) {
   if (!(file instanceof File)) return { changed: false, file }
   const type = file.type || ''
   if (type && !/^video\//i.test(type)) return { changed: false, file }
   if (typeof window === 'undefined' || !('VideoEncoder' in window)) return { changed: false, file }
-  const feas = await canOptimizeVideo(file)
+  const feas = await canOptimizeVideo(file, options)
   if (!feas.ok) return { changed: false, file }
 
   if (feas.plan.copyVideo) {
@@ -192,14 +198,16 @@ async function optimizeVideo (file, { onProgress } = {}) {
   return { changed: true, file: newFile }
 }
 
-async function selectVideoEncoderConfig ({ width, height, fps, bitrate = TARGET_VIDEO_BITRATE }) {
+async function selectVideoEncoderConfig ({ width, height, fps, bitrate = TARGET_VIDEO_BITRATE, preferCodec = 'hevc' }) {
   const hevc = { codec: 'hvc1.1.4.L123.B0', width, height, framerate: fps, bitrate, hardwareAcceleration: 'prefer-hardware', hevc: { format: 'hevc' } }
-  const supH = await VideoEncoder.isConfigSupported(hevc).catch(() => ({ supported: false }))
-  if (supH.supported) return { codecId: 'hevc', config: supH.config }
-
   const avc = { codec: 'avc1.64002A', width, height, framerate: fps, bitrate, hardwareAcceleration: 'prefer-hardware', avc: { format: 'avc' } }
-  const supA = await VideoEncoder.isConfigSupported(avc)
-  return { codecId: 'avc', config: supA.config }
+  const [first, second] = preferCodec === 'avc' ? [['avc', avc], ['hevc', hevc]] : [['hevc', hevc], ['avc', avc]]
+
+  const sup1 = await VideoEncoder.isConfigSupported(first[1]).catch(() => ({ supported: false }))
+  if (sup1.supported) return { codecId: first[0], config: sup1.config }
+
+  const sup2 = await VideoEncoder.isConfigSupported(second[1])
+  return { codecId: second[0], config: sup2.config }
 }
 
 function shouldDecodeViaVideoElement () {
@@ -725,7 +733,7 @@ async function encodeVideo ({ file, srcMeta, plan, onProgress }) {
     typeof t.isAudioTrack === 'function' && t.isAudioTrack() &&
     t.codec === 'aac' && [1, 2].includes(t.numberOfChannels) && [44_100, 48_000].includes(t.sampleRate)
   )
-  const encoder = passthroughTrack ? null : await selectVideoEncoderConfig({ width: targetWidth, height: targetHeight, fps: targetFps, bitrate: fallbackPlan.bitrate })
+  const encoder = passthroughTrack ? null : await selectVideoEncoderConfig({ width: targetWidth, height: targetHeight, fps: targetFps, bitrate: fallbackPlan.bitrate, preferCodec: fallbackPlan.preferCodec })
   const videoTrack = new EncodedVideoPacketSource(passthroughTrack?.codec || encoder.codecId)
   output.addVideoTrack(videoTrack, passthroughTrack ? { rotation: passthroughTrack.rotation } : { frameRate: targetFps })
 

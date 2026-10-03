@@ -60,6 +60,20 @@ const result = await optimizeVideo(file)
 // { changed: false, file: File('image.png') }
 ```
 
+### Options
+
+Both functions take an optional second argument. Leave it out and nothing changes.
+
+```js
+const result = await optimizeVideo(file, {
+  maxLongSide: 1280,      // default 1920
+  videoBitrate: 2_500_000, // bits per second, default 12_000_000
+  preferCodec: 'avc'      // 'hevc' (default) or 'avc'; falls back to the other if unsupported
+})
+```
+
+Pass the same options to `canOptimizeVideo(file, options)` so its feasibility check matches. With `preferCodec: 'avc'`, HEVC sources are re-encoded rather than passed through.
+
 ### registerStraightToVideoController
 
 If you're looking to rig `straight-to-video` up with Stimulus, you can register the included controller by passing your Stimulus app and the `Controller` parent class to `registerStraightToVideoController`:
