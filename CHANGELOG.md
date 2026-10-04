@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.0.15
 
 * `optimizeVideo` and `canOptimizeVideo` take optional `maxLongSide`, `videoBitrate` and `preferCodec` options. Defaults are unchanged.
 
